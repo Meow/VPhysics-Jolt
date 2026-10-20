@@ -1,0 +1,7 @@
+/* Symbols exported from the Linux modules. The engine only needs CreateInterface. */
+{
+	global:
+		CreateInterface;
+	local:
+		*;
+};

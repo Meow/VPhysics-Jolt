@@ -62,3 +62,4 @@ obj*/
 # CMake/Docker build
 /build/
 /dist/
+!/cmake/exports.map
