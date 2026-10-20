@@ -55,10 +55,22 @@ static ConVar vjolt_enhanced_inactive_edge_detection( "vjolt_enhanced_inactive_e
 static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_NONE, "Whether to pre-settle physics objects on map load." );
 
 // RaphaelIT7: Setting it to 0 crashes Jolt, so let's limit it to a minimum of 1
-static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of substeps to perform.", true, 1.0f, true, 8.0f );
+// Two collision steps per tick halve how far bodies move between contact checks. With one, small
+// props carried in a moving container (cans in a crate) are pushed through its thin walls. Together
+// with the linear cast threshold below this costs about the same as one step without it.
+static ConVar vjolt_substeps( "vjolt_substeps", "2", FCVAR_NONE, "Number of collision steps per physics tick.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
+
+// Jolt's defaults are tuned for meter-sized objects; Source props are often a few centimeters.
+static ConVar vjolt_speculative_distance( "vjolt_speculative_distance", "0.02", FCVAR_NONE, "Distance (meters) within which contacts are created ahead of time (Jolt mSpeculativeContactDistance).", true, 0.0f, true, 1.0f );
+static ConVar vjolt_penetration_slop( "vjolt_penetration_slop", "0.02", FCVAR_NONE, "Penetration (meters) allowed before position correction kicks in (Jolt mPenetrationSlop).", true, 0.0f, true, 1.0f );
+// Bodies that move less than this per step don't need linear casting. With 0 every moving body was
+// cast every step, which also made containers stop at the objects resting inside them (Jolt steals
+// the rest of the step from a cast body at its first hit) while those objects kept moving.
+static ConVar vjolt_linearcast_threshold( "vjolt_linearcast_threshold", "0.75", FCVAR_NONE, "Fraction of a body's inner radius it must move in a step before it is linear cast (Jolt mLinearCastThreshold).", true, 0.0f, true, 1.0f );
+static ConVar vjolt_linearcast_max_penetration( "vjolt_linearcast_max_penetration", "0.25", FCVAR_NONE, "Fraction of a body's inner radius it may move into another per step when linear casting (Jolt mLinearCastMaxPenetration).", true, 0.0f, true, 1.0f );
 
 static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.2", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );
 
@@ -801,8 +813,10 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mBaumgarte = vjolt_baumgarte_factor.GetFloat(); // 0.2 def
 		settings.mNumVelocitySteps = vjolt_velocity_steps.GetInt();
 		settings.mNumPositionSteps = vjolt_position_steps.GetInt();
-		settings.mLinearCastThreshold = 0.0f;
-		settings.mLinearCastMaxPenetration = 0.25f;
+		settings.mLinearCastThreshold = vjolt_linearcast_threshold.GetFloat();
+		settings.mLinearCastMaxPenetration = vjolt_linearcast_max_penetration.GetFloat();
+		settings.mSpeculativeContactDistance = vjolt_speculative_distance.GetFloat();
+		settings.mPenetrationSlop = vjolt_penetration_slop.GetFloat();
 		m_PhysicsSystem.SetPhysicsSettings( settings );
 	}
 

@@ -1016,85 +1016,202 @@ static float ComputeShadowController( JoltShadowControlParams &params, JPH::Vec3
 }
 
 
-void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot )
+namespace
 {
-	class ClampCollector final : public JPH::CollideShapeCollector
+	// A body touching (or within kContactDistance of) the query shape, and the direction from
+	// the query shape towards it.
+	struct ShadowContact
+	{
+		JPH::BodyID BodyID;
+		JPH::Vec3 Normal;
+		bool bStatic;
+	};
+
+	static constexpr float kShadowContactDistance = 0.025f; // ~1 inch
+	static constexpr int kShadowMaxContacts = 32;
+	// How many dynamic bodies a push may travel through before reaching the world
+	static constexpr int kShadowMaxChainDepth = 4;
+	// cos(45 degrees): how closely a support contact must line up with the push
+	static constexpr float kShadowSupportCos = 0.7071f;
+
+	class ShadowContactCollector final : public JPH::CollideShapeCollector
 	{
 	public:
-		ClampCollector( JPH::Vec3 *pVel, JoltPhysicsObject *pSelf, JPH::PhysicsSystem *pSystem )
-			: m_pVel( pVel ), m_pSelf( pSelf ), m_pSystem( pSystem ) {}
+		ShadowContactCollector( JPH::PhysicsSystem *pSystem, JoltPhysicsContactListener *pListener, JoltPhysicsObject *pSelf )
+			: m_pSystem( pSystem ), m_pListener( pListener ), m_pSelf( pSelf ) {}
 
 		void AddHit( const JPH::CollideShapeResult &inResult ) override
 		{
-			// Honor the game-side collision filter so we don't clamp against bodies
-			// that the game wouldn't actually collide with (e.g. NPC-clip brushes,
-			// which are static but pass through physics props).
+			if ( m_nContacts >= kShadowMaxContacts )
+			{
+				ForceEarlyOut();
+				return;
+			}
+
 			JPH::BodyLockRead lock( m_pSystem->GetBodyLockInterfaceNoLock(), inResult.mBodyID2 );
 			if ( !lock.Succeeded() )
 				return;
-			JoltPhysicsObject *pOther = reinterpret_cast< JoltPhysicsObject * >( lock.GetBody().GetUserData() );
+
+			const JPH::Body &body = lock.GetBody();
+			if ( body.IsSensor() )
+				return;
+
+			// Honor the game-side collision filter so we don't clamp against bodies that the game
+			// wouldn't actually collide with (e.g. NPC-clip brushes, which are static but pass
+			// through physics props).
+			JoltPhysicsObject *pOther = reinterpret_cast< JoltPhysicsObject * >( body.GetUserData() );
 			if ( !pOther || pOther == m_pSelf )
 				return;
-			JoltPhysicsContactListener *pListener = m_pSelf->GetJoltEnvironment()->GetContactListener();
-			if ( pListener && !pListener->ShouldCollide( m_pSelf, pOther ) )
+			if ( m_pListener && !m_pListener->ShouldCollide( m_pSelf, pOther ) )
 				return;
 
-			const JPH::Vec3 vNormal = inResult.mPenetrationAxis.NormalizedOr( JPH::Vec3::sAxisZ() );
-			const float flInto = m_pVel->Dot( vNormal );
-			if ( flInto > 0.0f )
-				*m_pVel = *m_pVel - vNormal * flInto;
+			m_Contacts[ m_nContacts++ ] = ShadowContact{
+				inResult.mBodyID2,
+				inResult.mPenetrationAxis.NormalizedOr( JPH::Vec3::sAxisZ() ),
+				body.IsStatic() || body.GetMotionType() != JPH::EMotionType::Dynamic,
+			};
 		}
+
+		ShadowContact m_Contacts[ kShadowMaxContacts ];
+		int m_nContacts = 0;
+
 	private:
-		JPH::Vec3 *m_pVel;
-		JoltPhysicsObject *m_pSelf;
 		JPH::PhysicsSystem *m_pSystem;
+		JoltPhysicsContactListener *m_pListener;
+		JoltPhysicsObject *m_pSelf;
 	};
 
-	class StaticOnlyFilter final : public JPH::BodyFilter
+	class ExcludeBodiesFilter final : public JPH::BodyFilter
 	{
 	public:
-		explicit StaticOnlyFilter( const JoltPhysicsObject *pSelf ) : m_pSelf( pSelf ) {}
-		bool ShouldCollideLocked( const JPH::Body &inBody ) const override
+		ExcludeBodiesFilter( const JPH::BodyID *pExcluded, int nExcluded ) : m_pExcluded( pExcluded ), m_nExcluded( nExcluded ) {}
+
+		bool ShouldCollide( const JPH::BodyID &inBodyID ) const override
 		{
-			if ( reinterpret_cast< const JoltPhysicsObject * >( inBody.GetUserData() ) == m_pSelf )
-				return false;
-			// Only clamp against static world geometry. Clamping against dynamic
-			// bodies would block lifting an object that has stuff on top of it.
-			return inBody.IsStatic() && !inBody.IsSensor();
+			for ( int i = 0; i < m_nExcluded; i++ )
+			{
+				if ( m_pExcluded[ i ] == inBodyID )
+					return false;
+			}
+			return true;
 		}
+
 	private:
-		const JoltPhysicsObject *m_pSelf;
+		const JPH::BodyID *m_pExcluded;
+		int m_nExcluded;
 	};
 
-	JPH::Mat44 query_transform = JPH::Mat44::sRotationTranslation(
+	// Collects the bodies touching a shape at the given transform.
+	void CollectShadowContacts( JPH::PhysicsSystem *pSystem, JoltPhysicsObject *pSelf, const JPH::Shape *pShape,
+		JPH::Mat44Arg matCOMTransform, JPH::Vec3Arg vMovementDirection,
+		const JPH::BodyID *pExcluded, int nExcluded, ShadowContactCollector &collector )
+	{
+		JPH::CollideShapeSettings settings;
+		settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
+		settings.mActiveEdgeMovementDirection = vMovementDirection;
+		settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
+		settings.mMaxSeparationDistance = kShadowContactDistance;
+
+		ExcludeBodiesFilter filter( pExcluded, nExcluded );
+		JPH::DefaultBroadPhaseLayerFilter bpFilter = pSystem->GetDefaultBroadPhaseLayerFilter( Layers::MOVING );
+		JPH::DefaultObjectLayerFilter olFilter = pSystem->GetDefaultLayerFilter( Layers::MOVING );
+
+		pSystem->GetNarrowPhaseQueryNoLock().CollideShape(
+			pShape, JPH::Vec3::sReplicate( 1.0f ), matCOMTransform, settings, JPH::Vec3::sZero(),
+			collector, bpFilter, olFilter, filter );
+	}
+
+	// Whether pushing this dynamic body along vDirection is resisted by static geometry, either
+	// directly or through a chain of other dynamic bodies (a prop pressed onto a prop on the floor).
+	// outSupportNormal is the normal of the static contact that holds the chain, pointing into it.
+	bool IsBodyBlockedAlong( JPH::PhysicsSystem *pSystem, JoltPhysicsContactListener *pListener, const JPH::BodyID &bodyID,
+		JPH::Vec3Arg vDirection, JPH::BodyID *pVisited, int nVisited, int nDepth, JPH::Vec3 &outSupportNormal )
+	{
+		JoltPhysicsObject *pObject = nullptr;
+		JPH::RefConst< JPH::Shape > pShape;
+		JPH::Mat44 matCOMTransform;
+		{
+			JPH::BodyLockRead lock( pSystem->GetBodyLockInterfaceNoLock(), bodyID );
+			if ( !lock.Succeeded() )
+				return false;
+			pObject = reinterpret_cast< JoltPhysicsObject * >( lock.GetBody().GetUserData() );
+			pShape = lock.GetBody().GetShape();
+			matCOMTransform = lock.GetBody().GetCenterOfMassTransform();
+		}
+		if ( !pObject )
+			return false;
+
+		pVisited[ nVisited++ ] = bodyID;
+
+		ShadowContactCollector collector( pSystem, pListener, pObject );
+		CollectShadowContacts( pSystem, pObject, pShape, matCOMTransform, vDirection, pVisited, nVisited, collector );
+
+		for ( int i = 0; i < collector.m_nContacts; i++ )
+		{
+			const ShadowContact &contact = collector.m_Contacts[ i ];
+			if ( contact.Normal.Dot( vDirection ) < kShadowSupportCos )
+				continue;
+
+			if ( contact.bStatic )
+			{
+				outSupportNormal = contact.Normal;
+				return true;
+			}
+
+			if ( nDepth > 0 && IsBodyBlockedAlong( pSystem, pListener, contact.BodyID, vDirection, pVisited, nVisited, nDepth - 1, outSupportNormal ) )
+				return true;
+		}
+
+		return false;
+	}
+}
+
+void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot )
+{
+	JoltPhysicsContactListener *pListener = m_pEnvironment->GetContactListener();
+
+	const JPH::Mat44 matCOMTransform = JPH::Mat44::sRotationTranslation(
 		qBodyRot, vBodyPos + qBodyRot * m_pBody->GetShape()->GetCenterOfMass() );
 
-	JPH::CollideShapeSettings settings;
-	settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
-	settings.mActiveEdgeMovementDirection = ioVelocity;
-	settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
-	settings.mMaxSeparationDistance = 0.025f;
+	JPH::BodyID visited[ kShadowMaxChainDepth + 2 ];
+	visited[ 0 ] = m_pBody->GetID();
 
-	ClampCollector collector( &ioVelocity, this, m_pPhysicsSystem );
-	StaticOnlyFilter filter( this );
+	ShadowContactCollector collector( m_pPhysicsSystem, pListener, this );
+	CollectShadowContacts( m_pPhysicsSystem, this, m_pBody->GetShape(), matCOMTransform, ioVelocity, visited, 1, collector );
 
-	JPH::DefaultBroadPhaseLayerFilter bpFilter = m_pPhysicsSystem->GetDefaultBroadPhaseLayerFilter( Layers::MOVING );
-	JPH::DefaultObjectLayerFilter olFilter = m_pPhysicsSystem->GetDefaultLayerFilter( Layers::MOVING );
+	for ( int i = 0; i < collector.m_nContacts; i++ )
+	{
+		const ShadowContact &contact = collector.m_Contacts[ i ];
+		const float flInto = ioVelocity.Dot( contact.Normal );
+		if ( flInto <= 0.0f )
+			continue;
 
-	m_pPhysicsSystem->GetNarrowPhaseQueryNoLock().CollideShape(
-		m_pBody->GetShape(),
-		JPH::Vec3::sReplicate( 1.0f ),
-		query_transform,
-		settings,
-		JPH::Vec3::sZero(),
-		collector,
-		bpFilter,
-		olFilter,
-		filter );
+		// Static contacts always block. Dynamic ones block when the body is pinned against the
+		// world in this direction, otherwise we'd push it into (and eventually through) the world
+		// with the controller's near-unlimited force. Pushing it is fine.
+		if ( contact.bStatic )
+		{
+			ioVelocity -= contact.Normal * flInto;
+			continue;
+		}
+
+		JPH::Vec3 vSupportNormal;
+		if ( IsBodyBlockedAlong( m_pPhysicsSystem, pListener, contact.BodyID, contact.Normal, visited, 1, kShadowMaxChainDepth, vSupportNormal ) )
+		{
+			ioVelocity -= contact.Normal * flInto;
+
+			// A slanted contact (pressing on the edge of a barrel) would still pass part of the
+			// push on towards the world, so don't push towards the support either.
+			const float flIntoSupport = ioVelocity.Dot( vSupportNormal );
+			if ( flIntoSupport > 0.0f )
+				ioVelocity -= vSupportNormal * flIntoSupport;
+		}
+	}
 }
 
 float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &params, float flSecondsToArrival, float flDeltaTime )
 {
+
 	JoltShadowControlParams joltParams =
 	{
 		.TargetPosition		= SourceToJolt::Distance( params.targetPosition ),
@@ -1131,9 +1248,9 @@ float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &p
 	// target velocity along blocked-direction contact normals before SetLinearAndAngularVelocity
 	// so the body isn't asked to move into a constrained direction in the first place.
 	//
-	// Static contacts always block. Dynamic contacts only block if THAT body is itself
-	// blocked along the same direction by a static contact (one level of IVP-style
-	// constraint propagation - handles "push A down onto B sitting on the ground").
+	// Static contacts always block. Dynamic contacts block if that body is itself pinned
+	// against static geometry along the same direction, possibly through a few more bodies
+	// (handles "push A down onto B sitting on the ground").
 	if ( !scratchLinearVelocity.IsNearZero() )
 	{
 		ClampShadowVelocityAgainstContacts( scratchLinearVelocity, scratchPosition, scratchRotation );
