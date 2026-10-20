@@ -34,7 +34,7 @@ enum VPhysicsGameFlags : uint32
 	FVPHYSICS_NO_SELF_COLLISIONS	= 0x8000,
 };
 
-class JoltPhysicsContactListener final : public JPH::ContactListener
+class JoltPhysicsContactListener final : public JPH::ContactListener, public JPH::PhysicsStepListener
 {
 public:
 	JoltPhysicsContactListener( JPH::PhysicsSystem &physicsSystem )
@@ -48,7 +48,13 @@ public:
 	}
 
 	void OnContactAdded( const JPH::Body &inBody1, const JPH::Body &inBody2, const JPH::ContactManifold &inManifold, JPH::ContactSettings &ioSettings ) override
-	{	
+	{
+		if ( IsRedundantCCDContact( inBody1, inBody2, inManifold ) )
+		{
+			ioSettings.mIsSensor = true;
+			return;
+		}
+
 		JoltPhysicsObject* pObject1 = reinterpret_cast<JoltPhysicsObject*>( inBody1.GetUserData() );
 		JoltPhysicsObject* pObject2 = reinterpret_cast<JoltPhysicsObject*>( inBody2.GetUserData() );
 
@@ -136,6 +142,12 @@ public:
 
 	void OnContactPersisted( const JPH::Body &inBody1, const JPH::Body &inBody2, const JPH::ContactManifold &inManifold, JPH::ContactSettings &ioSettings ) override
 	{
+		if ( IsRedundantCCDContact( inBody1, inBody2, inManifold ) )
+		{
+			ioSettings.mIsSensor = true;
+			return;
+		}
+
 		JoltPhysicsObject* pObject1 = reinterpret_cast<JoltPhysicsObject*>( inBody1.GetUserData() );
 		JoltPhysicsObject* pObject2 = reinterpret_cast<JoltPhysicsObject*>( inBody2.GetUserData() );
 
@@ -274,10 +286,13 @@ public:
 		m_EndTouchEvents.EmplaceBack( uThreadId, JoltPhysicsCollisionInfo( pObject1, pObject2 ) );
 	}
 
+	static constexpr size_t kMaxShouldCollideCacheSize = 1 << 16;
+
 	static inline uint64_t MakeCacheKey(JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1)
 	{
-		uint32_t keyA = pObject0->GetBodyID().GetIndexAndSequenceNumber();
-		uint32_t keyB = pObject1->GetBodyID().GetIndexAndSequenceNumber();
+		// Body IDs and pointers get reused, so a cached answer could otherwise outlive its objects
+		uint32_t keyA = pObject0->GetSerialNumber();
+		uint32_t keyB = pObject1->GetSerialNumber();
 		if (keyA > keyB)
 			std::swap(keyA, keyB);
 
@@ -343,6 +358,9 @@ public:
 		bool bCollide = m_pGameSolver->ShouldCollide( pObject0, pObject1, pObject0->GetGameData(), pObject1->GetGameData() );
 
 		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
+		// Entries of destroyed objects are never looked up again, don't let them pile up
+		if ( m_ShouldCollideCache.size() >= kMaxShouldCollideCacheSize )
+			m_ShouldCollideCache.clear();
 		m_ShouldCollideCache[ nCacheKey ] = bCollide;
 
 		return bCollide;
@@ -426,11 +444,13 @@ public:
 		if ( !m_pGameListener )
 			return;
 
-		// Send PreCollision events
+		// Send PreCollision and PostCollision events, as adjacent pairs.
 		//
-		// Don't clear the collision events the first time around as we have
-		// the post-collisde event to send too!
-		m_CollisionEvents.ForEach< false >( [ this ]( JoltPhysicsCollisionEvent& event )
+		// They must come in matched pairs: the game latches the objects and entities of the
+		// collision in PreCollision (CCollisionEvent::m_gameEvent) and uses them in PostCollision.
+		// Sending all Pre events and then all Post events gave every Post but the last the wrong
+		// objects (e.g. "CPhysicsSwapTemp with bogus physics object" in CBoneFollower).
+		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
 		{
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
@@ -453,6 +473,8 @@ public:
 			m_pGameListener->PreCollision( &event.m_Event );
 			pObj1->RestoreJoltLinearVelocity( object1Vel );
 			pObj2->RestoreJoltLinearVelocity( object2Vel );
+
+			m_pGameListener->PostCollision( &event.m_Event );
 		});
 
 		// Send StartTouch events
@@ -471,14 +493,6 @@ public:
 		m_FluidStartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
 		{
 			m_pGameListener->FluidStartTouch( event.pObject2, event.pObject1->GetFluidController() );
-		});
-
-		// Send PostCollision events
-		//
-		// Clear it this time as we are done with these!
-		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
-		{
-			m_pGameListener->PostCollision( &event.m_Event );
 		});
 
 		// Send Friction events. The game uses these to drive scrape sounds and
@@ -529,7 +543,49 @@ public:
 			m_pGameListener->PostSimulationFrame();
 	}
 
+	// Called at the start of every collision step
+	void OnStep( const JPH::PhysicsStepListenerContext &inContext ) override
+	{
+		for ( StepContactShard &shard : m_StepContacts )
+		{
+			std::lock_guard lock( shard.Lock );
+			shard.Keys.clear();
+		}
+	}
+
 private:
+
+	// Collision detection calls OnContactAdded/Persisted at most once per sub shape pair per
+	// collision step. Linear casting (CCD) runs after it and calls them again when the cast hits a
+	// sub shape pair that already has a contact. Between two dynamic bodies that contact is
+	// already solved, so the CCD hit only stops the cast body for the rest of the step (Jolt
+	// "steals" its remaining time). A container moved by the physgun then keeps stopping at the
+	// props resting in it while they keep moving, and they end up in and through its walls.
+	// Turning the repeated contact into a sensor makes Jolt skip the CCD stop. CCD hits against
+	// static and kinematic bodies, and hits on pairs that weren't touching yet, are kept.
+	bool IsRedundantCCDContact( const JPH::Body &inBody1, const JPH::Body &inBody2, const JPH::ContactManifold &inManifold )
+	{
+		if ( !inBody1.IsDynamic() || !inBody2.IsDynamic() || !s_bSkipRedundantCCDContacts )
+			return false;
+
+		const uint64 key = JPH::SubShapeIDPair( inBody1.GetID(), inManifold.mSubShapeID1, inBody2.GetID(), inManifold.mSubShapeID2 ).GetHash();
+		StepContactShard &shard = m_StepContacts[ key % kStepContactShards ];
+		std::lock_guard lock( shard.Lock );
+		return !shard.Keys.insert( key ).second;
+	}
+
+public:
+	// vjolt_linearcast_skip_touching, refreshed every Simulate
+	static inline bool s_bSkipRedundantCCDContacts = true;
+
+private:
+	struct StepContactShard
+	{
+		std::mutex Lock;
+		ankerl::unordered_dense::set< uint64 > Keys;
+	};
+	static constexpr size_t kStepContactShards = 32;
+	StepContactShard m_StepContacts[ kStepContactShards ];
 
 	static uint32 GetThreadId()
 	{

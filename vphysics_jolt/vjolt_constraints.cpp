@@ -49,7 +49,8 @@ static JPH::Vec3 HingePerpendicularVector( JPH::Vec3Arg dir )
 
 //-------------------------------------------------------------------------------------------------
 
-JoltPhysicsConstraintGroup::JoltPhysicsConstraintGroup()
+JoltPhysicsConstraintGroup::JoltPhysicsConstraintGroup( const constraint_groupparams_t &params )
+	: m_ErrorParams( params )
 {
 }
 
@@ -62,7 +63,10 @@ JoltPhysicsConstraintGroup::~JoltPhysicsConstraintGroup()
 void JoltPhysicsConstraintGroup::Activate()
 {
 	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
+	{
+		pConstraint->ApplySolverIterations( GetSolverIterations() );
 		pConstraint->Activate();
+	}
 }
 
 bool JoltPhysicsConstraintGroup::IsInErrorState()
@@ -82,7 +86,9 @@ void JoltPhysicsConstraintGroup::GetErrorParams( constraint_groupparams_t *pPara
 
 void JoltPhysicsConstraintGroup::SetErrorParams( const constraint_groupparams_t &params )
 {
-	m_ErrorParams = params;
+	// Like IVP, only the error policy changes; the iteration count is fixed at creation
+	m_ErrorParams.minErrorTicks = params.minErrorTicks;
+	m_ErrorParams.errorTolerance = params.errorTolerance;
 }
 
 void JoltPhysicsConstraintGroup::SolvePenetration( IPhysicsObject *pObj0, IPhysicsObject *pObj1 )
@@ -99,6 +105,12 @@ void JoltPhysicsConstraintGroup::AddConstraint( JoltPhysicsConstraint *pConstrai
 void JoltPhysicsConstraintGroup::RemoveConstraint( JoltPhysicsConstraint *pConstraint )
 {
 	Erase( m_pConstraints, pConstraint );
+}
+
+uint JoltPhysicsConstraintGroup::GetSolverIterations() const
+{
+	// IVP solves a constraint group with 2 iterations plus the requested additional ones
+	return static_cast< uint >( Clamp( m_ErrorParams.additionalIterations, 0, 253 ) + 2 );
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -216,13 +228,36 @@ void JoltPhysicsConstraint::SetAngularMotor( float rotSpeed, float maxAngularImp
 			// Something else to note is... does the below code for friction vs angular impulse work on
 			// ragdolls -> hinges correctly? This happens in Source, but this may not necessarily be correct.
 			// :/
-			VJoltAssert( m_pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF );
 
-			JPH::SixDOFConstraint *pConstraint = static_cast<JPH::SixDOFConstraint *>( m_pConstraint.GetPtr() );
-			pConstraint->SetTargetAngularVelocityCS( JPH::Vec3( rotSpeed, rotSpeed, rotSpeed ) );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationX, maxAngularImpulse );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationY, maxAngularImpulse );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationZ, maxAngularImpulse );
+			// InitialiseRagdoll creates a Fixed, Hinge or SwingTwist constraint depending on the
+			// number of free axes -- never a SixDOF -- so dispatch on the actual Jolt subtype.
+			// Casting to SixDOF here (as this used to) corrupts memory on $animatedfriction models.
+			switch ( m_pConstraint->GetSubType() )
+			{
+				case JPH::EConstraintSubType::SwingTwist:
+				{
+					JPH::SwingTwistConstraint *pConstraint = static_cast<JPH::SwingTwistConstraint *>( m_pConstraint.GetPtr() );
+					const JPH::EMotorState eMotorState = rotSpeed ? JPH::EMotorState::Velocity : JPH::EMotorState::Off;
+					pConstraint->SetSwingMotorState( eMotorState );
+					pConstraint->SetTwistMotorState( eMotorState );
+					pConstraint->SetTargetAngularVelocityCS( JPH::Vec3::sReplicate( rotSpeed ) );
+					pConstraint->SetMaxFrictionTorque( Max( vjolt_ragdoll_min_torque_friction.GetFloat(), fabsf( maxAngularImpulse ) ) );
+					break;
+				}
+
+				case JPH::EConstraintSubType::Hinge:
+				{
+					JPH::HingeConstraint *pConstraint = static_cast<JPH::HingeConstraint *>( m_pConstraint.GetPtr() );
+					pConstraint->SetMotorState( rotSpeed ? JPH::EMotorState::Velocity : JPH::EMotorState::Off );
+					pConstraint->SetTargetAngularVelocity( rotSpeed );
+					pConstraint->SetMaxFrictionTorque( Max( vjolt_ragdoll_min_torque_friction.GetFloat(), fabsf( maxAngularImpulse ) ) );
+					break;
+				}
+
+				default:
+					// Fixed joint (no free axes) -- nothing to motor.
+					break;
+			}
 			break;
 		}
 
@@ -394,7 +429,76 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 
 	JPH::Constraint *pConstraint = nullptr;
 
-	if ( uDOFCount == 0 )
+	if ( ragdoll.onlyAngularLimits )
+	{
+		// "Constrain rotation only" (GMod AdvBallsocket onlyrotation): the relative
+		// POSITION must stay free -- contraptions hang position off ropes/elastics
+		// (or nothing) and constrain only the relative orientation. LVS/simfphys
+		// suspend every wheel on such a constraint to a motion-disabled steer
+		// anchor, so locking translation here (what the Fixed/Hinge/SwingTwist
+		// mappings below all do) welds the whole vehicle to the anchor's spawn
+		// position: wheels spin, vehicle never moves. Jolt's SixDOF constraint
+		// expresses rotation-only directly: leave all translation axes free (the
+		// default) and map each rotation axis to fixed/free/limited.
+		JPH::Ref< JPH::SixDOFConstraintSettings > settings = new JPH::SixDOFConstraintSettings;
+		settings->mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+
+		settings->mPosition1 = constraintToReference.GetTranslation() - pRefBody->GetShape()->GetCenterOfMass();
+		settings->mAxisX1 = constraintToReference.GetAxisX();
+		settings->mAxisY1 = constraintToReference.GetAxisY();
+
+		settings->mPosition2 = constraintToAttached.GetTranslation() - pAttBody->GetShape()->GetCenterOfMass();
+		settings->mAxisX2 = constraintToAttached.GetAxisX();
+		settings->mAxisY2 = constraintToAttached.GetAxisY();
+
+		// Pyramid keeps the Y/Z swing limits independent per axis, matching the
+		// ragdoll parameter layout (cone would couple them).
+		settings->mSwingType = JPH::ESwingType::Pyramid;
+
+		for ( int i = 0; i < 3; i++ )
+		{
+			const JPH::SixDOFConstraintSettings::EAxis eAxis =
+				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+
+			// Inverted windows (min > max) are emitted systematically by Lua
+			// contraptions -- LVS mirrors every wheel's spin socket with a
+			// min/max-swapped twin -- and IVP tolerated them. Left alone their
+			// negative range would fall into the tiny-window branch below and
+			// hard-weld an axis the author meant to leave (nearly) free, so
+			// normalize by swap and classify the sane window instead.
+			const float flMin = Min( limits.lAxisLimitsRad[i].Min, limits.lAxisLimitsRad[i].Max );
+			const float flMax = Max( limits.lAxisLimitsRad[i].Min, limits.lAxisLimitsRad[i].Max );
+			const float flRange = flMax - flMin;
+
+			// Per-axis friction torque as specified (kg*in^2/s^2 -> N*m). No
+			// vjolt_ragdoll_min_torque_friction floor here: that floor steadies
+			// ragdoll joints, but on the free axis of a mechanical joint (a
+			// vehicle wheel's spin axis) it would act as a permanent brake.
+			settings->mMaxFriction[ eAxis ] = SourceToJolt::Torque( ragdoll.axes[i].torque );
+
+			if ( flRange >= DEG2RAD( 359.0f ) )
+			{
+				settings->MakeFreeAxis( eAxis );
+			}
+			else
+			{
+				// Preserve even near-zero authored windows. Jolt treats small
+				// centered swing/twist limits as locked; widening LVS's
+				// +/-0.0001deg to +/-0.5deg instead permits a persistent lean.
+				const float flCap = DEG2RAD( 180.0f );
+				settings->SetLimitedAxis( eAxis,
+					Max( flMin, -flCap ),
+					Min( flMax, flCap ) );
+			}
+		}
+
+		// Keep the Source-authored local frames for the joint's lifetime.
+		// LVS's common spawn rotation preserves their relative alignment;
+		// recapturing a later physics pose would turn transient tilt into
+		// the new rest pose instead of correcting it.
+		pConstraint = settings->Create( *pRefBody, *pAttBody );
+	}
+	else if ( uDOFCount == 0 )
 	{
 		JPH::FixedConstraintSettings settings;
 		settings.mAutoDetectPoint = true;
@@ -440,11 +544,6 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		settings.mMaxFrictionTorque = Max( flMinTorqueFriction, SourceToJolt::Torque( ( ragdoll.axes[0].torque + ragdoll.axes[1].torque + ragdoll.axes[2].torque ) / 3.0f ) );
 
 		pConstraint = settings.Create( *pRefBody, *pAttBody );
-	}
-
-	if ( ragdoll.onlyAngularLimits )
-	{
-		Log_Warning( LOG_VJolt, "Only angular limits. Need a way to disable the linear part of the constraint.\n" );
 	}
 
 	const bool bActive = !m_pGroup && ragdoll.constraint.isActive;
@@ -579,6 +678,7 @@ void JoltPhysicsConstraint::InitialiseFixed( IPhysicsConstraintGroup *pGroup, co
 	settings.mAutoDetectPoint = true;
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	m_pConstraint->SetEnabled( !pGroup && fixed.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
@@ -712,6 +812,14 @@ static void GetConstraintImpulses( const JPH::Constraint *pConstraint, float &ou
 			outLinear = fabsf( p->GetTotalLambdaPosition() );
 			break;
 		}
+		case JPH::EConstraintSubType::SixDOF:
+		{
+			// Rotation-only ragdoll constraints (onlyAngularLimits). Free axes report no lambda.
+			auto *p = static_cast< const JPH::SixDOFConstraint * >( pConstraint );
+			outLinear = p->GetTotalLambdaPosition().Length();
+			outAngular = p->GetTotalLambdaRotation().Length();
+			break;
+		}
 		default:
 			break;
 	}
@@ -730,6 +838,19 @@ static float MaxInverseMass( JoltPhysicsObject *pA, JoltPhysicsObject *pB )
 		return pMP ? pMP->GetInverseMass() : 0.0f;
 	};
 	return Max( invMassOf( pA ), invMassOf( pB ) );
+}
+
+void JoltPhysicsConstraint::ApplySolverIterations( uint nIterations )
+{
+	if ( !m_pConstraint )
+		return;
+
+	// Jolt ignores the global step counts for an island when every body in it has an override, so
+	// never go below them (or below the override the constraint was created with).
+	const JPH::PhysicsSettings &settings = m_pPhysicsSystem->GetPhysicsSettings();
+	nIterations = Min( nIterations, 255u );
+	m_pConstraint->SetNumVelocityStepsOverride( Max( Max( nIterations, settings.mNumVelocitySteps ), m_pConstraint->GetNumVelocityStepsOverride() ) );
+	m_pConstraint->SetNumPositionStepsOverride( Max( Max( nIterations, settings.mNumPositionSteps ), m_pConstraint->GetNumPositionStepsOverride() ) );
 }
 
 bool JoltPhysicsConstraint::CheckBroken()

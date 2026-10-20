@@ -55,21 +55,22 @@ static ConVar vjolt_enhanced_inactive_edge_detection( "vjolt_enhanced_inactive_e
 static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_NONE, "Whether to pre-settle physics objects on map load." );
 
 // RaphaelIT7: Setting it to 0 crashes Jolt, so let's limit it to a minimum of 1
-// Two collision steps per tick halve how far bodies move between contact checks. With one, small
-// props carried in a moving container (cans in a crate) are pushed through its thin walls. Together
-// with the linear cast threshold below this costs about the same as one step without it.
-static ConVar vjolt_substeps( "vjolt_substeps", "2", FCVAR_NONE, "Number of collision steps per physics tick.", true, 1.0f, true, 8.0f );
+static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of collision steps per physics tick.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
 
 // Jolt's defaults are tuned for meter-sized objects; Source props are often a few centimeters.
 static ConVar vjolt_speculative_distance( "vjolt_speculative_distance", "0.02", FCVAR_NONE, "Distance (meters) within which contacts are created ahead of time (Jolt mSpeculativeContactDistance).", true, 0.0f, true, 1.0f );
-static ConVar vjolt_penetration_slop( "vjolt_penetration_slop", "0.02", FCVAR_NONE, "Penetration (meters) allowed before position correction kicks in (Jolt mPenetrationSlop).", true, 0.0f, true, 1.0f );
+// Contacts only get pushed apart once they are deeper than this, so it's how far props visibly sink
+// into each other and the world (Jolt's 0.02 is 0.8 units). It also limits how far a linear cast
+// body may move into what it hits per step.
+static ConVar vjolt_penetration_slop( "vjolt_penetration_slop", "0.002", FCVAR_NONE, "Penetration (meters) allowed before position correction kicks in (Jolt mPenetrationSlop).", true, 0.0f, true, 1.0f );
 // Bodies that move less than this per step don't need linear casting. With 0 every moving body was
 // cast every step, which also made containers stop at the objects resting inside them (Jolt steals
 // the rest of the step from a cast body at its first hit) while those objects kept moving.
 static ConVar vjolt_linearcast_threshold( "vjolt_linearcast_threshold", "0.75", FCVAR_NONE, "Fraction of a body's inner radius it must move in a step before it is linear cast (Jolt mLinearCastThreshold).", true, 0.0f, true, 1.0f );
+static ConVar vjolt_linearcast_skip_touching( "vjolt_linearcast_skip_touching", "1", FCVAR_NONE, "Don't let linear casting stop a body at a dynamic body it is already touching (keeps props inside moving containers)." );
 static ConVar vjolt_linearcast_max_penetration( "vjolt_linearcast_max_penetration", "0.25", FCVAR_NONE, "Fraction of a body's inner radius it may move into another per step when linear casting (Jolt mLinearCastMaxPenetration).", true, 0.0f, true, 1.0f );
 
 static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.2", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );
@@ -256,6 +257,7 @@ JoltPhysicsEnvironment::JoltPhysicsEnvironment()
 
 	m_pDragController = new JoltPhysicsDragController();
 	m_PhysicsSystem.AddStepListener( m_pDragController );
+	m_PhysicsSystem.AddStepListener( &m_ContactListener );
 }
 
 JoltPhysicsEnvironment::~JoltPhysicsEnvironment()
@@ -275,6 +277,7 @@ JoltPhysicsEnvironment::~JoltPhysicsEnvironment()
 	}
 
 	m_PhysicsSystem.RemoveStepListener( m_pDragController );
+	m_PhysicsSystem.RemoveStepListener( &m_ContactListener );
 	delete m_pDragController;
 	m_pDragController = nullptr;
 }
@@ -715,7 +718,7 @@ void JoltPhysicsEnvironment::DestroyConstraint( IPhysicsConstraint *pConstraint 
 
 IPhysicsConstraintGroup *JoltPhysicsEnvironment::CreateConstraintGroup( const constraint_groupparams_t &groupParams )
 {
-	return new JoltPhysicsConstraintGroup;
+	return new JoltPhysicsConstraintGroup( groupParams );
 }
 
 void JoltPhysicsEnvironment::DestroyConstraintGroup( IPhysicsConstraintGroup *pGroup )
@@ -817,6 +820,7 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mLinearCastMaxPenetration = vjolt_linearcast_max_penetration.GetFloat();
 		settings.mSpeculativeContactDistance = vjolt_speculative_distance.GetFloat();
 		settings.mPenetrationSlop = vjolt_penetration_slop.GetFloat();
+		JoltPhysicsContactListener::s_bSkipRedundantCCDContacts = vjolt_linearcast_skip_touching.GetBool();
 		m_PhysicsSystem.SetPhysicsSettings( settings );
 	}
 
@@ -890,8 +894,9 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 
 	// If the delete queue is disabled, we only added to it during the simulation
 	// ie. callbacks etc. So flush that now.
-	if ( !m_bEnableDeleteQueue )
+	if ( !m_bEnableDeleteQueue || m_bDeleteDeadObjectsAfterSimulation )
 		DeleteDeadObjects();
+	m_bDeleteDeadObjectsAfterSimulation = false;
 
 #ifdef JPH_DEBUG_RENDERER
 	JoltPhysicsDebugRenderer::GetInstance().RenderPhysicsSystem( m_PhysicsSystem );
@@ -1001,21 +1006,30 @@ void JoltPhysicsEnvironment::GetActiveObjects( IPhysicsObject **pOutputObjectLis
 	}
 }
 
+// GMod calls this on every Lua PhysObj access (GMod::Util::IsPhysicsObjectValid scans the list),
+// so only rebuild it when objects were created, destroyed or transferred.
 const IPhysicsObject **JoltPhysicsEnvironment::GetObjectList( int *pOutputObjectCount ) const
 {
-	m_PhysicsSystem.GetBodies( m_CachedBodies );
+	const uint32 nBodyCount = m_PhysicsSystem.GetNumBodies();
+	if ( m_bObjectListDirty || nBodyCount != m_nObjectListBodyCount )
+	{
+		m_PhysicsSystem.GetBodies( m_CachedBodies );
 
-	const int nCount = int ( m_CachedBodies.size() );
+		m_CachedObjects.clear();
+		m_CachedObjects.reserve( m_CachedBodies.size() );
+		for ( const JPH::BodyID &id : m_CachedBodies )
+		{
+			JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( id );
+			if ( pBody && pBody->GetUserData() )
+				m_CachedObjects.push_back( reinterpret_cast< IPhysicsObject * >( pBody->GetUserData() ) );
+		}
+
+		m_nObjectListBodyCount = nBodyCount;
+		m_bObjectListDirty = false;
+	}
 
 	if ( pOutputObjectCount )
-		*pOutputObjectCount = nCount;
-
-	m_CachedObjects.resize( nCount );
-	for ( int i = 0; i < nCount; i++ )
-	{
-		JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( m_CachedBodies[ i ] );
-		m_CachedObjects[ i ] = reinterpret_cast< IPhysicsObject * >( pBody->GetUserData() );
-	}
+		*pOutputObjectCount = int( m_CachedObjects.size() );
 
 	return m_CachedObjects.data();
 }
@@ -1027,6 +1041,8 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 
 	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
 	bodyInterface.RemoveBody( pJoltObject->GetBodyID() );
+	MarkObjectListDirty();
+	pJoltEnv->MarkObjectListDirty();
 
 	pJoltEnv->ObjectTransferHandOver( pJoltObject );
 	pJoltObject->UpdateEnvironment( pJoltEnv );
@@ -1038,6 +1054,15 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 
 void JoltPhysicsEnvironment::CleanupDeleteList()
 {
+	// Game callbacks during the simulation (collision events etc.) can call this. Objects that
+	// queued events still refer to must stay alive until the callbacks are done, so delete them
+	// when the simulation ends instead.
+	if ( m_bSimulating )
+	{
+		m_bDeleteDeadObjectsAfterSimulation = true;
+		return;
+	}
+
 	DeleteDeadObjects();
 }
 

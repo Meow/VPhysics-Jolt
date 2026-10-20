@@ -96,6 +96,7 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	}
 
 	UpdateMaterialProperties();
+	m_pEnvironment->MarkObjectListDirty();
 
 #if GAME_GMOD
 	if ( m_pEnvironment->GetGModObjectEvents() )
@@ -112,6 +113,7 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	, m_pGameData( pGameData )
 {
 	RestoreObjectState( recorder );
+	m_pEnvironment->MarkObjectListDirty();
 
 #if GAME_GMOD
 	if (m_pEnvironment->GetGModObjectEvents())
@@ -138,6 +140,7 @@ JoltPhysicsObject::~JoltPhysicsObject()
 		m_destroyedListeners[ i ]->OnJoltPhysicsObjectDestroyed( this );
 
 	m_pEnvironment->RemoveDirtyStaticBody( GetBodyID() );
+	m_pEnvironment->MarkObjectListDirty();
 
 	JPH::BodyInterface& bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
 	bodyInterface.DestroyBody( GetBodyID() );
@@ -377,25 +380,25 @@ void JoltPhysicsObject::RecheckContactPoints( bool bSearchForNewContacts /*= fal
 
 void JoltPhysicsObject::SetMass( float mass )
 {
-	// To match regular VPhysics, allow 0 here but not at init.
-	mass = Clamp( mass, 0.0f, VPHYSICS_MAX_MASS );
+	mass = Clamp( mass, VPHYSICS_MIN_MASS, VPHYSICS_MAX_MASS );
 
 	m_flCachedMass = mass;
 	m_flCachedInvMass = mass ? 1.0f / mass : 0.0f;
 
 	if ( !IsStatic() )
 	{
-		JPH::MotionProperties* pMotionProperties = m_pBody->GetMotionProperties();
-		// Mass is already in KG. IVP is weird.
-
-		// Josh: This is what we used to do and it was giving VERY whacky results
-		// when moving objects around after calling SetMass.
-		// pMotionProperties->SetInverseMass( m_flCachedInvMass );
-		// This method below seems to work properly because it deals with all of the inertia crap.
-		JPH::MassProperties massProperties = m_pBody->GetShape()->GetMassProperties();
-		massProperties.ScaleToMass( mass );
-		massProperties.mInertia( 3, 3 ) = 1.0f;
-		pMotionProperties->SetMassProperties( JPH::EAllowedDOFs::All, massProperties );
+		// Like IVP's change_mass, scale the current inertia with the mass instead of rebuilding it
+		// from the shape, so inertia set with SetInertia survives. Mass is already in KG.
+		JPH::MotionProperties *pMotionProperties = m_pBody->GetMotionProperties();
+		if ( pMotionProperties->GetInverseMassUnchecked() > 0.0f )
+			pMotionProperties->ScaleToMass( mass );
+		else
+		{
+			JPH::MassProperties massProperties = m_pBody->GetShape()->GetMassProperties();
+			massProperties.ScaleToMass( mass );
+			massProperties.mInertia( 3, 3 ) = 1.0f;
+			pMotionProperties->SetMassProperties( JPH::EAllowedDOFs::All, massProperties );
+		}
 
 		CalculateBuoyancy();
 		RecomputeDrag();

@@ -202,6 +202,9 @@ public:
 	void AddDirtyStaticBody( const JPH::BodyID &id );
 	void RemoveDirtyStaticBody( const JPH::BodyID &id );
 
+	// Objects were created or destroyed, rebuild the list GetObjectList returns
+	void MarkObjectListDirty() const { m_bObjectListDirty = true; }
+
 private:
 
 	void RemoveBodyAndDeleteObject( JoltPhysicsObject* pObject );
@@ -217,6 +220,7 @@ private:
 
 	bool m_bSimulating = false;
 	bool m_bEnableDeleteQueue = false;
+	bool m_bDeleteDeadObjectsAfterSimulation = false;
 	bool m_bWakeObjectsOnConstraintDeletion = false;
 	bool m_bOptimizedBroadPhase = false;
 	bool m_bUseLinearCast = true;
@@ -233,6 +237,8 @@ private:
 	// For GetObjectList
 	mutable JPH::BodyIDVector m_CachedBodies;
 	mutable std::vector< const IPhysicsObject * > m_CachedObjects;
+	mutable uint32 m_nObjectListBodyCount = 0;
+	mutable bool m_bObjectListDirty = true;
 
 	// For GetActiveObjectCount and GetActiveObjects
 	mutable JPH::BodyIDVector m_CachedActiveBodies;

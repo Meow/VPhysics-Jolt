@@ -361,6 +361,10 @@ int JoltPhysicsPlayerController::TryTeleportObject()
 	m_pObject->GetPosition( nullptr, &qCurrentAngles );
 	m_pObject->SetPosition( m_vTargetPosition, qCurrentAngles, true );
 	m_pCharacter->SetPosition( SourceToJolt::Distance( m_vTargetPosition ) );
+
+	// Otherwise OnPostSimulate derives a velocity across the whole teleport distance
+	m_vOldPosition = m_vTargetPosition;
+	m_vLastImpulse = vec3_origin;
 	return 1;
 }
 
@@ -431,7 +435,7 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 	Vector vNewVelocity = ( vNewPosition - m_vOldPosition ) / flDeltaTime;
 	AngularImpulse vAngularImpulse = vec3_origin;
 
-	m_pObject->SetPosition( vNewPosition, QAngle(), false );
+	m_pObject->SetPosition( vNewPosition, vec3_angle, false ); // QAngle() is uninitialized
 	m_pObject->SetVelocity( &vNewVelocity, &vAngularImpulse );
 
 	m_vLastImpulse = vNewVelocity;

@@ -352,6 +352,14 @@ private:
 	JPH::Body *m_pBody = nullptr;						// Underlying Jolt body
 	JoltPhysicsEnvironment *m_pEnvironment = nullptr;	// Physics environment this body belongs to
 	JPH::PhysicsSystem *m_pPhysicsSystem = nullptr;		// Physics system this body belongs to
+
+public:
+	// Unique for the lifetime of the process, unlike the body ID (whose sequence number is 8 bits)
+	// and the address, which both get reused
+	uint32 GetSerialNumber() const { return m_nSerialNumber; }
+private:
+	static inline std::atomic< uint32 > s_nNextSerialNumber = { 1 };
+	const uint32 m_nSerialNumber = s_nNextSerialNumber++;
 };
 
 // Josh: This doesn't handle mass change and is kind of a hack and sliightly wrong.

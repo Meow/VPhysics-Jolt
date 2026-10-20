@@ -130,7 +130,8 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 	JPH::RegisterTypes();
 
 	// Create an allocator for temporary allocations during physics simulations
-	m_pTempAllocator = new JPH::TempAllocatorImpl( kTempAllocSize );
+	// Falls back to malloc instead of aborting when a step needs more than kTempAllocSize
+	m_pTempAllocator = new JPH::TempAllocatorImplWithMallocFallback( kTempAllocSize );
 
 	// Josh:
 	// We may want to replace this with a better heuristic, or add a launch arg for this in future.

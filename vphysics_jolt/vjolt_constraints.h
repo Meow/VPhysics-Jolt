@@ -26,7 +26,7 @@ class JoltPhysicsEnvironment;
 class JoltPhysicsConstraintGroup final : public IPhysicsConstraintGroup
 {
 public:
-	JoltPhysicsConstraintGroup();
+	explicit JoltPhysicsConstraintGroup( const constraint_groupparams_t &params );
 	~JoltPhysicsConstraintGroup() override;
 
 	void Activate() override;
@@ -38,6 +38,7 @@ public:
 
 	void AddConstraint( JoltPhysicsConstraint *pConstraint );
 	void RemoveConstraint( JoltPhysicsConstraint *pConstraint );
+	uint GetSolverIterations() const;
 
 private:
 	std::vector< JoltPhysicsConstraint * >	m_pConstraints;
@@ -82,6 +83,9 @@ public:
 	void InitialisePulley( IPhysicsConstraintGroup *pGroup, const constraint_pulleyparams_t &pulley );
 
 	void SaveConstraintSettings( JPH::StateRecorder &recorder );
+
+	// Solver steps for the constraint group this constraint is in
+	void ApplySolverIterations( uint nIterations );
 
 	bool CheckBroken();
 
