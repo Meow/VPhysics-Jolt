@@ -30,7 +30,9 @@ static constexpr uint kTempAllocSize = 64 * 1024 * 1024;
 // event vectors.
 // This isn't an issue, the benefits of more threads tends to trail off between
 // 8-16 threads anyway.
+// The thread that calls Simulate also runs jobs, so at most 63 workers.
 static constexpr uint kMaxPhysicsThreads = 64;
+static constexpr uint kMaxPhysicsWorkers = kMaxPhysicsThreads - 1;
 
 DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_VJolt, "VJolt", 0, LS_MESSAGE, Color( 205, 142, 212, 255 ) );
 DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_JoltInternal, "Jolt" );
@@ -45,45 +47,41 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( JoltPhysicsInterfaceGMod, IPhysics, VPHYSICS_
 
 //-------------------------------------------------------------------------------------------------
 
-// Slart:
-// Instead of using Jolt's allocator override functionality, we disable it and just define the
-// functions here, all of Jolt's memory allocation goes through here, besides new and delete
-// which use the Valve overrides in memoverride.cpp.
-// For Desolation we use mi-malloc rather than dlmalloc, that also gets built into the statically
-// linked releases for gmod (along with all of tier0 and vstdlib).
-// RaphaelIT7: It should always be kept in mind that inBlock for Free/AlignedFree can be NULL as per jolt docs! (though the engine already checks for null)
-#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
-// RaphaelIT7:
-// We don't use JPH_DISABLE_CUSTOM_ALLOCATOR on release builds!
-// This is because of Jolt doing very frequent allocations, which had caused 20% CPU time in new & another 20% CPU time just for delete.
+// All of Jolt's memory allocation goes through tier0's allocator. new and delete use the Valve
+// overrides in memoverride.cpp.
+//
+// With JPH_DISABLE_CUSTOM_ALLOCATOR, Jolt calls these functions directly, and all five must be
+// defined here or Jolt's own malloc-based Memory.cpp gets linked in. Otherwise (GMod) Jolt calls
+// them through its function pointers, which we point here in Init.
+//
+// inBlock may be NULL for Free/AlignedFree.
+#ifdef JPH_DISABLE_CUSTOM_ALLOCATOR
 namespace JPH
-{
-	JPH_EXPORT AllocateFunction Allocate;
-	JPH_EXPORT ReallocateFunction Reallocate;
-	JPH_EXPORT FreeFunction Free;
-	JPH_EXPORT AlignedAllocateFunction AlignedAllocate;
-	JPH_EXPORT AlignedFreeFunction AlignedFree;
-}
-
-#define JPH Jolt
+#else
+namespace VJoltAllocator
 #endif
-namespace JPH {
-#undef JPH
-
+{
 	void *Allocate( size_t inSize )
 	{
 		return MemAlloc_Alloc( inSize );
 	}
 
-	// RaphaelIT7:
-	// Currently only the GMod SDK has MemAlloc_Realloc defined
-	// (I was lazy & don't really see a point to have it for any other game currently)
-#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
 	void *Reallocate( void *inBlock, size_t inOldSize, size_t inNewSize )
 	{
+#ifdef GAME_GMOD
 		return MemAlloc_Realloc( inBlock, inNewSize );
-	}
+#else
+		// Not every SDK has MemAlloc_Realloc
+		void *pNewBlock = MemAlloc_Alloc( inNewSize );
+		if ( inBlock )
+		{
+			if ( pNewBlock )
+				memcpy( pNewBlock, inBlock, Min( inOldSize, inNewSize ) );
+			MemAlloc_Free( inBlock );
+		}
+		return pNewBlock;
 #endif
+	}
 
 	void Free( void *inBlock )
 	{
@@ -114,11 +112,11 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 	MathLib_Init();
 
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
-	JPH::Allocate = Jolt::Allocate;
-	JPH::Reallocate = Jolt::Reallocate;
-	JPH::Free = Jolt::Free;
-	JPH::AlignedAllocate = Jolt::AlignedAllocate;
-	JPH::AlignedFree = Jolt::AlignedFree;
+	JPH::Allocate = VJoltAllocator::Allocate;
+	JPH::Reallocate = VJoltAllocator::Reallocate;
+	JPH::Free = VJoltAllocator::Free;
+	JPH::AlignedAllocate = VJoltAllocator::AlignedAllocate;
+	JPH::AlignedFree = VJoltAllocator::AlignedFree;
 #endif
 
 	// Install callbacks
@@ -136,9 +134,9 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 
 	// Josh:
 	// We may want to replace this with a better heuristic, or add a launch arg for this in future.
-	// Right now, this does what -1 does in Jolt, but limits it to 64 threads, as we cannot support
-	// more than this (see above).
-	const uint32 threadCount = Min( std::thread::hardware_concurrency() - 1, kMaxPhysicsThreads );
+	// Right now, this does what -1 does in Jolt, but limits the thread count (see above).
+	const uint32 hardwareThreads = Max( std::thread::hardware_concurrency(), 1u );
+	const uint32 threadCount = Min( hardwareThreads - 1, kMaxPhysicsWorkers );
 	m_pJobSystem = new JPH::JobSystemThreadPool( JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threadCount );
 
 	return INIT_OK;
@@ -231,10 +229,10 @@ void JoltPhysicsInterface::DestroyAllCollisionSets()
 }
 
 #if GAME_GMOD
-extern bool IsValidPhyiscsObject( IPhysicsObject* pObject );
-bool JoltPhysicsInterface::IsValidPhysicsObject( IPhysicsObject* pObject )
+extern bool IsRegisteredPhysicsObject( IPhysicsObject *pObject );
+bool JoltPhysicsInterface::IsValidPhysicsObject( IPhysicsObject *pObject )
 {
-	return ::IsValidPhyiscsObject;
+	return IsRegisteredPhysicsObject( pObject );
 }
 #endif
 

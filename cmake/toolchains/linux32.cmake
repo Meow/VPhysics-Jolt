@@ -1,0 +1,10 @@
+# Linux x86 (32-bit), GCC 14 from the Steam Runtime 3 (sniper) SDK
+set( CMAKE_SYSTEM_NAME Linux )
+set( CMAKE_SYSTEM_PROCESSOR i686 )
+set( CMAKE_C_COMPILER gcc-14 )
+set( CMAKE_CXX_COMPILER g++-14 )
+set( CMAKE_C_FLAGS_INIT "-m32" )
+set( CMAKE_CXX_FLAGS_INIT "-m32" )
+set( CMAKE_EXE_LINKER_FLAGS_INIT "-m32" )
+set( CMAKE_SHARED_LINKER_FLAGS_INIT "-m32" )
+set( CMAKE_LIBRARY_ARCHITECTURE i386-linux-gnu )

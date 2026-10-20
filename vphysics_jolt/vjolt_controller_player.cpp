@@ -416,31 +416,6 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		}
 		vControllerVelocity += vGroundVelocity;
 
-		/* Way too experimental
-		if (m_pCharacter->IsSupported())
-		{
-			auto groundBodyID = m_pCharacter->GetGroundBodyID();
-			if (!groundBodyID.IsInvalid())
-			{
-				const JPH::BodyLockInterfaceNoLock &bodyLockInterface = m_pObject->GetEnvironment()->GetPhysicsSystem()->GetBodyLockInterfaceNoLock();
-				JPH::Body *body = bodyLockInterface.TryGetBody(groundBodyID);
-
-				if (body && body->IsDynamic())
-				{
-					// RaphaelIT7: We remove any velocity below this because else often you cannot jump off moving props.
-					constexpr float kVelocityEpsilon = 0.025f;
-					if (fabsf(vControllerVelocity.x) < kVelocityEpsilon)
-						vControllerVelocity.x = 0.0f;
-
-					if (fabsf(vControllerVelocity.y) < kVelocityEpsilon)
-						vControllerVelocity.y = 0.0f;
-
-					if (fabsf(vControllerVelocity.z) < kVelocityEpsilon)
-						vControllerVelocity.z = 0.0f;
-				}
-			}
-		}*/
-
 		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vControllerVelocity ) );
 	}
 
@@ -481,20 +456,6 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 		JPH::Mat44 matComTransform = m_pCharacter->GetWorldTransform().PreTranslated( m_pCharacter->GetShape()->GetCenterOfMass() );
 		JoltToSource::AABBBounds( m_pCharacter->GetShape()->GetWorldSpaceBounds( matComTransform, JPH::Vec3{ 1.0f, 1.0f, 1.0f } ), vecMins, vecMaxs );
 		debugRenderer.GetDebugOverlay()->AddBoxOverlay( vec3_origin, vecMins, vecMaxs, QAngle(), m_bEnable ? 0 : 255, m_bEnable ? 255 : 0, 0, 100, 0.0f );
-
-#if 0
-		Log_Msg( LOG_VJolt,
-			"Player State:\n"
-			"  vOldPosition: %g %g %g\n"
-			"  vNewPosition: %g %g %g\n"
-			"  vNewVelocity: %g %g %g\n"
-			"  m_vLastImpulse: %g %g %g\n",
-			m_vOldPosition.x, m_vOldPosition.x, m_vOldPosition.z,
-			vNewPosition.x, vNewPosition.x, vNewPosition.z,
-			vNewVelocity.x, vNewVelocity.x, vNewVelocity.z,
-			m_vLastImpulse.x, m_vLastImpulse.x, m_vLastImpulse.z
-		);
-#endif
 	}
 
 	if ( m_bEnable )

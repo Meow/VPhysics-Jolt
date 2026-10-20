@@ -7,8 +7,6 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static ConVar vjolt_shadow_debug( "vjolt_shadow_debug", "0", FCVAR_NONE, "Log shadow controller parameters." );
-
 //-------------------------------------------------------------------------------------------------
 
 JoltPhysicsShadowController::JoltPhysicsShadowController( JoltPhysicsObject *pObject, bool allowTranslation, bool allowRotation )
@@ -71,9 +69,7 @@ void JoltPhysicsShadowController::Update( const Vector &position, const QAngle &
 void JoltPhysicsShadowController::MaxSpeed( float maxSpeed, float maxAngularSpeed )
 {
 	m_maxSpeed = maxSpeed;
-	m_maxDampSpeed = maxSpeed;
 	m_maxAngular = maxAngularSpeed;
-	m_maxDampAngular = maxAngularSpeed;
 }
 
 void JoltPhysicsShadowController::StepUp( float height )

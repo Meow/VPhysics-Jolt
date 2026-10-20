@@ -272,13 +272,9 @@ KeyValues *JoltPhysicsSurfaceProps::SurfacePropsToKeyValues( const char *pszBuff
 #if !defined( GAME_GMOD_64X )
 void *JoltPhysicsSurfaceProps::GetIVPMaterial( int nIndex )
 {
-	nIndex = RemapMaterialIndexForReserved( nIndex );
-
-	if ( nIndex < 0 || nIndex > ( m_SurfaceProps.GetNumStrings() - 1 ) )
-		return nullptr;
-
-	// return &m_SurfaceProps[ nIndex ];
-	return nullptr; // RaphaelIT7: Current issue - the struct probably differs from IVP's class which would cause all sorts of issues :/
+	// RaphaelIT7: We can't return &m_SurfaceProps[ nIndex ], JoltSurfaceProp has a different layout than IVP's material class
+	Log_Stub( LOG_VJolt );
+	return nullptr;
 }
 
 int JoltPhysicsSurfaceProps::GetIVPMaterialIndex( const void *pMaterial ) const

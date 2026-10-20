@@ -223,27 +223,6 @@ public:
 		// Ensure that the contents filter was used
 		VJoltAssert( contents & m_ContentsMask );
 
-#if 0
-		// Test if this collision is closer than the previous one
-		const float theirEarlyOut = inResult.GetEarlyOutFraction();
-		const float ourEarlyOut = GetEarlyOutFraction();
-		if ( !m_DidHit || theirEarlyOut < ourEarlyOut )
-		{
-			// Update our early out fraction
-			UpdateEarlyOutFraction( theirEarlyOut );
-
-			m_Fraction = inResult.mFraction;
-			m_ResultContents = contents;
-			m_SubShapeID = inResult.mSubShapeID2;
-			m_ContactPoint = inResult.mContactPointOn2;
-			m_PenetrationAxis = inResult.mPenetrationAxis;
-			m_PenetrationDepth = inResult.mPenetrationDepth;
-
-			m_DidHit = true;
-			m_HitBackFace = inResult.mIsBackFaceHit;
-		}
-#endif
-
 		const float theirEarlyOut = inResult.GetEarlyOutFraction();
 		if ( theirEarlyOut < 0.0f )
 			m_bStartSolid = true;
@@ -737,13 +716,6 @@ static void CollideShapeVsShape( const Vector &start, const Vector &end, const C
 			mins = JoltToSource::Distance( collideAABB.mMin );
 			maxs = JoltToSource::Distance( collideAABB.mMax );
 			pOverlay->AddBoxOverlay( vec3_origin, mins, maxs, vec3_angle, 255, 64, 64, 255, -1.0f );
-		}
-
-		// Don't bother doing any work if we don't contain the thing to be tested
-		if ( !collideAABB.Contains( sweepAABB ) )
-		{
-			// TODO(Slart): Uncomment this
-			//return;
 		}
 
 		ContentsCollector_SimpleCollide collector;

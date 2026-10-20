@@ -3,6 +3,10 @@
 
 #include "compat/better_winlite.h"
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
 #ifdef _MSC_VER
 #define VJOLT_RETURN_ADDRESS() _ReturnAddress()
 #else
@@ -20,6 +24,11 @@ FORCEINLINE void GetCallingFunctionModulePath( void *pReturnAddress, char *pszMo
         return;
     }
 #else
-    V_strncpy( pszModulePath, "Unknown", len);
+    Dl_info info;
+    if ( dladdr( pReturnAddress, &info ) && info.dli_fname ) {
+        V_strncpy( pszModulePath, info.dli_fname, len );
+        return;
+    }
 #endif
+    V_strncpy( pszModulePath, "Unknown", len );
 }

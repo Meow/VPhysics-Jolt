@@ -13,7 +13,6 @@
 //=================================================================================================
 
 #include "cbase.h"
-#include "coordsize.h"
 
 #include "vjolt_callstack.h"
 #include "vjolt_collide.h"
@@ -59,8 +58,7 @@ static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_N
 static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of substeps to perform.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
-static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
-static ConVar vjolt_deterministic( "vjolt_deterministic", "0", FCVAR_NONE, "Whether the simulation is deterministic or not." );
+static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
 
 static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.2", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );
 
@@ -803,7 +801,6 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mBaumgarte = vjolt_baumgarte_factor.GetFloat(); // 0.2 def
 		settings.mNumVelocitySteps = vjolt_velocity_steps.GetInt();
 		settings.mNumPositionSteps = vjolt_position_steps.GetInt();
-		settings.mDeterministicSimulation = vjolt_deterministic.GetBool();
 		settings.mLinearCastThreshold = 0.0f;
 		settings.mLinearCastMaxPenetration = 0.25f;
 		m_PhysicsSystem.SetPhysicsSettings( settings );
@@ -831,29 +828,26 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	const int nCollisionSubSteps = vjolt_substeps.GetInt();
 
 	// If we haven't already, optimize the broadphase, currently this can only happen once per-environment
+	bool bInitialSimulation = false;
 	if ( !m_bOptimizedBroadPhase )
 	{
 		m_PhysicsSystem.OptimizeBroadPhase();
 		m_bOptimizedBroadPhase = true;
+		bInitialSimulation = vjolt_initial_simulation.GetBool();
+	}
 
-		if ( vjolt_initial_simulation.GetBool() )
-		{
-			// Do an initial simulation to settle objects down.
-			static constexpr float InitialIterationTimescale = 1.0f / 60.0f;
-			static constexpr int MaxInitialIterations = 1024;
-			static constexpr int InitialSubSteps = 4;
+	if ( bInitialSimulation )
+	{
+		// Do an initial simulation to settle objects down.
+		static constexpr float InitialIterationTimescale = 1.0f / 60.0f;
+		static constexpr int MaxInitialIterations = 1024;
+		static constexpr int InitialSubSteps = 4;
 
-			int nIterCount = 0;
-			while ( m_PhysicsSystem.GetNumActiveBodies( JPH::EBodyType::RigidBody ) && nIterCount < MaxInitialIterations )
-			{
-				m_PhysicsSystem.Update( InitialIterationTimescale, InitialSubSteps, tempAllocator, jobSystem );
-				nIterCount++;
-			}
-		}
-		else
+		int nIterCount = 0;
+		while ( m_PhysicsSystem.GetNumActiveBodies( JPH::EBodyType::RigidBody ) && nIterCount < MaxInitialIterations )
 		{
-			// Move things around!
-			m_PhysicsSystem.Update( deltaTime, nCollisionSubSteps, tempAllocator, jobSystem );
+			m_PhysicsSystem.Update( InitialIterationTimescale, InitialSubSteps, tempAllocator, jobSystem );
+			nIterCount++;
 		}
 	}
 	else

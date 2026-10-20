@@ -50,9 +50,10 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
-// RaphaelIT7: I don't know why it hates me for trying to include it, but here we go
-#include "ankerl/unordered_dense.h"
+#include <bit>
 #include <mutex>
+#include <shared_mutex>
+#include "ankerl/unordered_dense.h"
 
 // Mathlib
 #include "mathlib/mathlib.h"
@@ -93,6 +94,12 @@
 #include "vphysics/virtualmesh.h"
 
 // Jolt
+// The SDK's min/max macros (valve_minmax_on.h, Windows only) break Jolt's headers.
+#pragma push_macro( "min" )
+#pragma push_macro( "max" )
+#undef min
+#undef max
+
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 
@@ -128,7 +135,6 @@
 #include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/SixDOFConstraint.h>
-#include <Jolt/Physics/Constraints/SixDOFConstraint.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/Constraints/PulleyConstraint.h>
@@ -137,6 +143,14 @@
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/Physics/Character/Character.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
+#include <Jolt/Core/UnorderedSet.h>
+#ifdef JPH_DEBUG_RENDERER
+#include <Jolt/Renderer/DebugRenderer.h>
+#endif
+
+#pragma pop_macro( "min" )
+#pragma pop_macro( "max" )
 
 // Ourselves
 #include "vjolt_interface.h"

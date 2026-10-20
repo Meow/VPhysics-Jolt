@@ -1,7 +1,7 @@
 
 #pragma once
 
-// RaphaelIT7: IVP reminants :/
+// RaphaelIT7: IVP remnants :/
 static constexpr int ShadowMaterialIndex = 0xF000;
 static constexpr int MaxSurfaceMaterials = 128;
 

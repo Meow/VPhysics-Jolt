@@ -25,12 +25,12 @@ using IVJoltDebugOverlay = IVDebugOverlay;
 #define VJOLT_DEBUG_OVERLAY_VERSION VDEBUG_OVERLAY_INTERFACE_VERSION
 #endif
 
-// Call this in stubbed functions to spew when they're hit
-#if 1 // DEVELOPMENT_ONLY
-#define Log_Stub( Channel )
-#else
+// Call this in stubbed functions. Define VJOLT_LOG_STUBS to spew when they're hit.
+#ifdef VJOLT_LOG_STUBS
 #define Log_Stub( Channel ) \
 	Log_Warning( Channel, "Stub: %s\n", __FUNCTION__ )
+#else
+#define Log_Stub( Channel )
 #endif
 
 // So we can toggle assertions in this module at our discretion
@@ -106,7 +106,7 @@ public:
 	JPH::TempAllocator *GetTempAllocator() { return m_pTempAllocator; }
 	JPH::JobSystem *GetJobSystem() { return m_pJobSystem; }
 
-	void SetDebugOverlay( IVJoltDebugOverlay *pOverlay ) { if ( m_pDebugOverlay != pOverlay ) m_pDebugOverlay = pOverlay; }
+	void SetDebugOverlay( IVJoltDebugOverlay *pOverlay ) { m_pDebugOverlay = pOverlay; }
 	IVJoltDebugOverlay *GetDebugOverlay() { return m_pDebugOverlay; }
 
 private:
@@ -115,16 +115,10 @@ private:
 
 	std::unordered_map< unsigned int, JoltPhysicsCollisionSet > m_CollisionSets;
 
-	// We need a temp allocator for temporary allocations during the physics update. We're
-	// pre-allocating 10 MB to avoid having to do allocations during the physics update. 
-	// B.t.w. 10 MB is way too much for this example but it is a typical value you can use.
-	// If you don't want to pre-allocate you can also use TempAllocatorMalloc to fall back to
-	// malloc / free.
+	// Pre-allocated scratch memory for the physics update (kTempAllocSize)
 	JPH::TempAllocator *m_pTempAllocator;
 
-	// We need a job system that will execute physics jobs on multiple threads. Typically
-	// you would implement the JobSystem interface yourself and let Jolt Physics run on top
-	// of your own job scheduler. JobSystemThreadPool is an example implementation.
+	// Runs Jolt's physics jobs on worker threads
 	JPH::JobSystem *m_pJobSystem;
 
 	// For debugging stuff in collide and such.

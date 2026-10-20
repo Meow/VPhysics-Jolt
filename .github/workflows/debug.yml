@@ -5,51 +5,28 @@ on: [push, workflow_dispatch]
 jobs:
   linux-gmod-dedicated:
     runs-on: ubuntu-latest
-    container: debian:bullseye
     name: "GMod Dedicated Server"
     env:
         PTERODACTYL_SERVER: ${{ secrets.PTERODACTYL_SERVER }}
     steps:
-    - name: Install Dependencies
-      run: |
-        dpkg --add-architecture i386
-        apt update
-        apt install -y build-essential git libstdc++6:i386 gcc-multilib g++-multilib zip curl
-
-    - name: Checkout Mini Source SDK
-      uses: actions/checkout@v4
-      with:
-        repository: RaphaelIT7/mini-source-sdk
-        ref: gmod-changes
-
     - name: Checkout VPhysics Jolt
       uses: actions/checkout@v4
       with:
-        path: gmod/src/vphysics_jolt
         submodules: recursive
 
-    - name: Build GCC x86
-      working-directory: gmod/src
-      run: |
-        chmod +x createjoltprojects_server.sh
-        chmod +x devtools/bin/vpc_linux
-        chmod +x devtools/bin/vpc
-        chmod +x devtools/gendbg.sh
-        ./createjoltprojects_server.sh 
-        make -f jolt.mak -j $(nproc)
+    - name: Build
+      run: ./build.sh linux32
 
     - name: Create zip file
       run: |
-        cd gmod/game
-        zip -r vphysics_jolt_gmod_dedicated_linux32.zip bin
-        mv vphysics_jolt_gmod_dedicated_linux32.zip ../../
+        cd dist/gmod-linux32-srv
+        zip -r ../../vphysics_jolt_gmod_dedicated_linux32.zip bin
 
-    # RaphaelIT7: GLuaTets setup - we replace vphysics in the bin/ folder
+    # RaphaelIT7: GLuaTest setup - we replace vphysics in the bin/ folder
     - name: Create GLuaTest file
       run: |
-        cd gmod/game
-        tar -czf vphysics_jolt_gmod_gluatest.tar.gz bin/
-        mv vphysics_jolt_gmod_gluatest.tar.gz ../../
+        cd dist/gmod-linux32-srv
+        tar -czf ../../vphysics_jolt_gmod_gluatest.tar.gz bin/
 
     # RaphaelIT7: I use pterodactyl for testing, though it's not required for any forks / will not run for them.
     - name: Deploy to pterodactyl

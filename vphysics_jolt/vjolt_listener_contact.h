@@ -3,9 +3,7 @@
 
 #include "vjolt_controller_fluid.h"
 #include "vjolt_surfaceprops.h"
-#include "ankerl/unordered_dense.h"
 
-#include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
 struct JoltPhysicsContactPair
 {
@@ -156,16 +154,15 @@ public:
 		// per-tick estimates - used both for friction sound events and for
 		// IPhysicsFrictionSnapshot::GetNormalForce / GetEnergyAbsorbed feedback.
 		JPH::CollisionEstimationResult result;
-		JPH::EstimateCollisionResponse( inBody1, inBody2, inManifold, result,
-			ioSettings.mCombinedFriction, ioSettings.mCombinedRestitution,
+		JPH::EstimateCollisionResponse( inBody1, inBody2, inManifold, result, ioSettings,
 			/*minVelocityForRestitution*/ 1.0f, /*numIterations*/ 4 );
 
 		// Sum normal impulse across contact points and stash on each body for the
 		// friction snapshot to read. IVP exposes get_vert_force per contact; this is
 		// the closest equivalent we can produce in Jolt.
 		float flNormalImpulseSum = 0.0f;
-		for ( const JPH::CollisionEstimationResult::Impulse &imp : result.mImpulses )
-			flNormalImpulseSum += imp.mContactImpulse;
+		for ( float flContactImpulse : result.mContactImpulse )
+			flNormalImpulseSum += flContactImpulse;
 
 		pObject1->AccumulateContactNormalImpulse( pObject2, flNormalImpulseSum );
 		pObject2->AccumulateContactNormalImpulse( pObject1, flNormalImpulseSum );
@@ -176,13 +173,8 @@ public:
 		if ( !ShouldFrictionCallback( pObject1, pObject2 ) )
 			return;
 
-		// Sum friction impulse vectors across the manifold's contact points.
-		JPH::Vec3 vFrictionImpulse = JPH::Vec3::sZero();
-		for ( const JPH::CollisionEstimationResult::Impulse &imp : result.mImpulses )
-			vFrictionImpulse += imp.mFrictionImpulse1 * result.mTangent1
-			                  + imp.mFrictionImpulse2 * result.mTangent2;
-
-		const float flFrictionImpulseMag = vFrictionImpulse.Length();
+		// Jolt applies friction for the whole manifold at a single point.
+		const float flFrictionImpulseMag = result.mFrictionImpulse.Length();
 		if ( flFrictionImpulseMag < 1e-4f )
 			return;
 
@@ -711,6 +703,7 @@ private:
 		template < typename... T >
 		void EmplaceBack( uint32 uThreadId, T&&... val)
 		{
+			VJoltAssert( uThreadId < kMaxThreads );
 			m_Mask |= 1ull << uThreadId;
 			m_Events[ uThreadId ].emplace_back( std::forward< T >( val )... );
 		}
@@ -718,9 +711,9 @@ private:
 		template < bool bClear, typename FuncType >
 		void ForEach( FuncType func )
 		{
-			for ( uint32 thread = m_Mask; thread; thread &= thread - 1 )
+			for ( uint64_t thread = m_Mask; thread; thread &= thread - 1 )
 			{
-				const uint32 i = JPH::CountTrailingZeros( thread );
+				const uint32 i = std::countr_zero( thread );
 				for ( auto &event : m_Events[ i ] )
 					func( event );
 

@@ -263,7 +263,7 @@ public:
 	float GetAngularDragInDirection( JPH::Vec3Arg vLocalAngularVelocity ) const;
 
 	// Should be called BEFORE UpdateLayer inside EnableMotion!
-	void RecaulculateFixedConstraintPartnerMovable();
+	void RecalculateFixedConstraintPartnerMovable();
 private:
 	void UpdateMaterialProperties();
 

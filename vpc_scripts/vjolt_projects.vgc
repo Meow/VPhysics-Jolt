@@ -43,8 +43,3 @@ $Project "vphysics_wrapper_external"
 {
 	"vphysics_jolt/vphysics_wrapper/vphysics_wrapper_external.vpc"
 }
-
-$Project "vphysics_jolt_static"
-{
-	"vphysics_jolt/vphysics_jolt/vphysics_jolt_static.vpc"
-}

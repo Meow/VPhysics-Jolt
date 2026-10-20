@@ -34,25 +34,22 @@ static ConVar vjolt_object_debug( "vjolt_object_debug", "0", FCVAR_NONE, "Log di
 
 // NOTE: Perferably gmod will use the SetLuaReference function
 // & use the IGModPhysicsObjectEvent::ObjectDestroyed callback to invalidate references instead
-static std::unordered_set< JoltPhysicsObject* > g_pObjects;
-inline void RegisterPhysicsObject( JoltPhysicsObject* pObject )
+static std::unordered_set< IPhysicsObject * > g_pObjects;
+static void RegisterPhysicsObject( IPhysicsObject *pObject )
 {
-	auto it = g_pObjects.find(pObject);
-	if (it == g_pObjects.end())
-		g_pObjects.insert(pObject);
+	g_pObjects.insert( pObject );
 }
 
-inline void UnregisterPhysicsObject( JoltPhysicsObject* pObject )
+static void UnregisterPhysicsObject( IPhysicsObject *pObject )
 {
-	auto it = g_pObjects.find(pObject);
-	if (it != g_pObjects.end())
-		g_pObjects.erase(it);
+	g_pObjects.erase( pObject );
 }
 
-bool IsValidPhyiscsObject( IPhysicsObject* pObject ) // for vjolt_interface.cpp to use
+// Used by JoltPhysicsInterface::IsValidPhysicsObject. Compares pointers only, so pObject may be
+// a dangling pointer.
+bool IsRegisteredPhysicsObject( IPhysicsObject *pObject )
 {
-	JoltPhysicsObject *pJoltObject = static_cast< JoltPhysicsObject * >( pObject );
-	return g_pObjects.find( pJoltObject ) != g_pObjects.end();
+	return g_pObjects.find( pObject ) != g_pObjects.end();
 }
 #endif
 
@@ -99,6 +96,13 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	}
 
 	UpdateMaterialProperties();
+
+#if GAME_GMOD
+	if ( m_pEnvironment->GetGModObjectEvents() )
+		m_pEnvironment->GetGModObjectEvents()->ObjectCreated( this );
+
+	RegisterPhysicsObject( this );
+#endif
 }
 
 JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *pEnvironment, void *pGameData, JPH::StateRecorder &recorder )
@@ -211,9 +215,11 @@ bool JoltPhysicsObject::IsAttachedToConstraint( bool bExternalOnly ) const
 			// RaphaelIT7: (ToDo) Check if this might need to call TryGetBody to be safe?
 			if ( bExternalOnly )
 			{
-				JoltPhysicsObject *pObject = reinterpret_cast< JoltPhysicsObject * >( twoBody->GetBody2()->GetUserData() );
-				return pObject && pObject->GetGameData() != GetGameData();
 				// RaphaelIT7: vphysics seems to compare bExternalOnly by comparing the GameData, so lets keep that behavior too
+				JoltPhysicsObject *pObject = reinterpret_cast< JoltPhysicsObject * >( twoBody->GetBody2()->GetUserData() );
+				if ( pObject && pObject->GetGameData() != GetGameData() )
+					return true;
+				continue;
 			}
 
 			return true;
@@ -222,7 +228,9 @@ bool JoltPhysicsObject::IsAttachedToConstraint( bool bExternalOnly ) const
 			if ( bExternalOnly )
 			{
 				JoltPhysicsObject *pObject = reinterpret_cast< JoltPhysicsObject * >( twoBody->GetBody1()->GetUserData() );
-				return pObject && pObject->GetGameData() != GetGameData();
+				if ( pObject && pObject->GetGameData() != GetGameData() )
+					return true;
+				continue;
 			}
 
 			return true;
@@ -279,7 +287,7 @@ void JoltPhysicsObject::EnableMotion( bool enable )
 		return;
 
 	m_bPinned = bPinned;
-	RecaulculateFixedConstraintPartnerMovable(); // RaphaelIT7: For improved fixed constraints
+	RecalculateFixedConstraintPartnerMovable(); // RaphaelIT7: For improved fixed constraints
 	UpdateLayer();
 }
 
@@ -874,9 +882,7 @@ void JoltPhysicsObject::SetShadow( float maxSpeed, float maxAngularSpeed, bool a
 	}
 	else
 	{
-#if 1
 		m_bShadowTemporarilyDisableGravity = false;
-#endif
 
 		m_pShadowController = static_cast<JoltPhysicsShadowController *>( m_pEnvironment->CreateShadowController( this, allowPhysicsMovement, allowPhysicsRotation ) );
 		m_pShadowController->MaxSpeed( maxSpeed, maxAngularSpeed );
@@ -887,14 +893,12 @@ void JoltPhysicsObject::UpdateShadow( const Vector &targetPosition, const QAngle
 {
 	if ( m_pShadowController )
 	{
-#if 1
 		if ( tempDisableGravity != m_bShadowTemporarilyDisableGravity )
 		{
 			m_bShadowTemporarilyDisableGravity = tempDisableGravity;
-			if ( !m_pShadowController || m_pShadowController->AllowsTranslation() )
+			if ( m_pShadowController->AllowsTranslation() )
 				EnableGravity( !m_bShadowTemporarilyDisableGravity );
 		}
-#endif
 		m_pShadowController->Update( targetPosition, targetAngles, timeOffset );
 	}
 }
@@ -903,42 +907,6 @@ void JoltPhysicsObject::UpdateShadow( const Vector &targetPosition, const QAngle
 
 int JoltPhysicsObject::GetShadowPosition( Vector *position, QAngle *angles ) const
 {
-#if 0
-	// Josh:
-	// If func_door_rotating, func_tracktrains are moving slowly,
-	// check this function out...
-	//
-	// Interpolates to the next timestep
-	float flTimeStep = m_pEnvironment->GetSimulationTimestep();
-
-	JPH::BodyInterface &bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
-
-	JPH::Vec3 joltPosition, joltLinearVelocity, joltAngularVelocity;
-	JPH::Quat joltRotation;
-
-	bodyInterface.GetPositionAndRotation( m_pBody->GetID(), joltPosition, joltRotation );
-	bodyInterface.GetLinearAndAngularVelocity( m_pBody->GetID(), joltLinearVelocity, joltAngularVelocity );
-
-	if ( position )
-	{
-		*position = JoltToSource::Distance( joltPosition + ( joltLinearVelocity * flTimeStep ) );
-	}
-	if ( angles )
-	{
-		// From Jolt's AddRotationStep.
-
-		JPH::Vec3 joltAngularVelocityTimesDT = joltAngularVelocity * flTimeStep;
-		float len = joltAngularVelocityTimesDT.Length();
-
-		JPH::Quat newQuat = joltRotation;
-		if ( len > 1.0e-6f ) 
-			newQuat = ( JPH::Quat::sRotation( joltAngularVelocityTimesDT / len, len ) * joltRotation ).Normalized();
-		*angles = JoltToSource::Angle( newQuat );
-	}
-
-	return 1;
-#endif
-
 	GetPosition( position, angles );
 	return 1;
 }
@@ -1707,7 +1675,7 @@ IPhysicsEnvironment *JoltPhysicsObject::GetEnvironment()
 
 // RaphaelIT7: To improve fixed constraints by making objects kinda static/unmovable when their partner is freezed.
 // This is needed since Jolt cannot guarantee perfectly fixed constraints - they could always move/rotate a bit which we don't want.
-void JoltPhysicsObject::RecaulculateFixedConstraintPartnerMovable()
+void JoltPhysicsObject::RecalculateFixedConstraintPartnerMovable()
 {
 	// Reset our own constraint-pinned state; we'll re-evaluate below.
 	m_bConstraintPinned = false;

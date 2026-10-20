@@ -58,3 +58,7 @@ obj*/
 # Mac Stuff
 *.xcodeproj/
 
+
+# CMake/Docker build
+/build/
+/dist/

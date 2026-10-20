@@ -11,7 +11,7 @@ In our testing, the performance overhead from having thousands of objects moving
 
 ## Features
 
-Volt is mostly feature complete, but is missing some things such as support for raycast vehicles, breakable constraints, and perhaps other things we've missed!
+Volt is mostly feature complete, but is missing some things such as full support for raycast vehicles, and perhaps other things we've missed!
 
 It is our goal to implement any missing features at some point.
 
@@ -23,7 +23,7 @@ It is not meant to be a bash on anyone elses work however, the Bullet VPhysics p
 |:--------------|:--------:|:-------------:|:---------------:|
 | Constraints (except Pulleys)                                  | ✔️ | ✔️ | ✔️ |
 | Pulleys                                                       | ✔️ | ✔️ | ❌ |
-| Breakable constraints                                         | ✔️ | ❌ | ❌ |
+| Breakable constraints                                         | ✔️ | ✔️ | ❌ |
 | Motors (Motion Controllers)                                   | ✔️ | ✔️ | ✔️ |
 | Motors (Constraint)                                           | ✔️ | ✔️ | ❌ |
 | Ragdolls                                                      | ✔️ | ✔️ | ✔️ |
@@ -45,28 +45,50 @@ It is not meant to be a bash on anyone elses work however, the Bullet VPhysics p
 
 ## Bugs
 
-VPhysics Jolt is not without its flaws, however. See the [issue tracker](https://github.com/Joshua-Ashton/VPhysics-Jolt/issues) for bugs that are known.
+VPhysics Jolt is not without its flaws, however. See the [issue tracker](https://github.com/RaphaelIT7/VPhysics-Jolt/issues) for bugs that are known.
 
 There are definitely going to be bugs that we don't know about or haven't encountered, or different quirks across engine branches.
 
 ## How to build
 
-The Volt code is provided as-is, it is up to you to build it for your SDK, etc.
+### Garry's Mod
 
-Volt should build fine against Source SDK 2013 and Alien Swarm SDK on a MSVC or GCC compiler with at least C++20 support.
+Garry's Mod builds use CMake in Docker, against the GMod headers in [RaphaelIT7/mini-source-sdk](https://github.com/RaphaelIT7/mini-source-sdk/tree/gmod-changes) (fetched automatically, at a pinned commit):
+
+```bash
+git clone --recursive https://github.com/RaphaelIT7/VPhysics-Jolt.git
+cd VPhysics-Jolt
+./build.sh                 # or: ./build.sh linux32 linux64 win32 win64
+```
+
+Linux builds use the Steam Runtime 3 (sniper) SDK image. Windows builds use MSVC (Visual Studio 2022) under Wine, via [msvc-wine](https://github.com/mstorsjo/msvc-wine); building that image downloads MSVC and accepts the [Visual Studio license](https://go.microsoft.com/fwlink/?LinkId=2086102).
+
+The results go to `dist/`, laid out like the game directory:
+
+| Package | Files | For |
+|:--|:--|:--|
+| `gmod-linux32` | `bin/vphysics.so` | 32-bit Linux client and listen server (public, prerelease, dev branches) |
+| `gmod-linux32-srv` | `bin/vphysics_srv.so` | 32-bit Linux dedicated server (public, prerelease, dev branches) |
+| `gmod-linux64` | `bin/linux64/vphysics.so` | 64-bit Linux dedicated server (x86-64 branch) |
+| `gmod-linux64-client` | `bin/linux64/vphysics_client.so` | 64-bit Linux client (x86-64 branch) |
+| `gmod-win32` | `bin/vphysics.dll` | 32-bit Windows client and dedicated server |
+| `gmod-win64` | `bin/win64/vphysics.dll` | 64-bit Windows client and dedicated server (x86-64 branch) |
+
+Each package also has `vphysics_jolt_{sse2,sse42,avx2}` next to the wrapper; the wrapper picks one for the CPU. Copy all of them into the game directory. The `_srv` and `_client` packages differ from the others only in which tier0/vstdlib libraries they link, because those Linux installs name them `libtier0_srv.so` / `libtier0_client.so`.
+
+### Source SDK 2013 and Alien Swarm
+
+These still use VPC. Volt should build fine against Source SDK 2013 and Alien Swarm SDK on MSVC, or GCC 11 or newer, with C++20 support.
 
 *If you are building directly against the public SDK 2013 and Alien Swarm SDKs, you will need to do minor work to memoverride.cpp to make it compatible with the newer compilers and newer Windows SDKs.*
 
-Unfortunately we cannot redistribute the additional code/headers needed to build Volt for games such as Garry's Mod which uses a different VPhysics interface (CS:GO's) to what is found in the Valve-provided public SDKs.
-
-For full build instructions pertaining to SDK 2013, refernce [build.md](/build.md).
+For full build instructions pertaining to SDK 2013, reference [build.md](/build.md).
 
 ## Download
 
-Development builds for each commit for SDK2013 SP/MP + ASW are available as artifacts on each commit on GitHub through GitHub Actions.</br>
-Development builds for each commit for Garry's Mod are available on [froggi.es](https://git.froggi.es/joshua/vphysics_jolt_gmod_builds).
+Development builds for each commit are available as artifacts on GitHub Actions, for Garry's Mod and for SDK2013 SP/MP + ASW.
 
-For each release, binary builds are provided for Garry's Mod and Source SDK 2013 on the [Releases](https://github.com/Joshua-Ashton/VPhysics-Jolt/releases/) page.
+Binary builds for each release are on the [Releases](https://github.com/RaphaelIT7/VPhysics-Jolt/releases/) page.
 
 ## Media
 

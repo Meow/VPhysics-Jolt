@@ -41,9 +41,7 @@ private:
 	float m_secondsToArrival = 0;
 
 	float m_maxSpeed = 0.0f;
-	float m_maxDampSpeed = 0.0f;
 	float m_maxAngular = 0.0f;
-	float m_maxDampAngular = 0.0f;
 	float m_teleportDistance = 0.0f;
 	bool m_isPhysicallyControlled = false;
 	bool m_allowTranslation = false;

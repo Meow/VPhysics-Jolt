@@ -4,7 +4,6 @@
 #include "coordsize.h"
 #include "mathlib/polyhedron.h"
 
-#include <Jolt/Core/UnorderedSet.h>
 
 #include "vjolt_parse.h"
 #include "vjolt_querymodel.h"
@@ -82,31 +81,6 @@ CPhysConvex *JoltPhysicsCollision::ConvexFromPlanes( float *pPlanes, int planeCo
 {
 	Log_Stub( LOG_VJolt );
 	return nullptr;
-
-	/*struct listplane_t
-	{
-		float normal[3];
-		float dist;
-	};
-	listplane_t *pList = (listplane_t*)pPlanes;
-
-	mergeDistance = SourceToJolt::Distance(mergeDistance);
-	int vertCount = planeCount * 2;
-	std::unique_ptr< JPH::Vec3[] > verts = std::make_unique< JPH::Vec3[] >( vertCount );
-	int vertIdx = 0;
-	for ( int i = 0; i < planeCount; i++ )
-	{
-		pList[i].normal[0] = SourceToJolt::Distance(pList[i].normal[0]);
-		pList[i].normal[1] = SourceToJolt::Distance(pList[i].normal[1]);
-		pList[i].normal[2] = SourceToJolt::Distance(pList[i].normal[2]);
-		pList[i].dist = SourceToJolt::Distance(pList[i].dist);
-
-		// ToDo.
-	}
-
-	JPH::ConvexHullShapeSettings settings( verts.get(), vertCount, kMaxConvexRadius, nullptr );
-	settings.mHullTolerance = 0.0f;
-	return ShapeSettingsToPhysConvex( settings );*/
 }
 
 float JoltPhysicsCollision::ConvexVolume( CPhysConvex *pConvex )

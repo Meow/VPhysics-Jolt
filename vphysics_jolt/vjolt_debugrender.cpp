@@ -8,7 +8,6 @@
 
 #ifdef JPH_DEBUG_RENDERER
 
-#include <Jolt/Renderer/DebugRenderer.h>
 
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/imesh.h"
