@@ -13,6 +13,11 @@
 
 #include "vjolt_interface.h"
 
+#ifndef _WIN32
+#include <unistd.h>
+extern char **environ;
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -101,6 +106,48 @@ namespace VJoltAllocator
 
 //-------------------------------------------------------------------------------------------------
 
+// Convars can also be set from the environment at startup, for launchers without a console:
+// VJOLT_CVAR_<name>=<value>, e.g. VJOLT_CVAR_vjolt_substeps=2.
+static void ApplyConVarOverridesFromEnvironment()
+{
+	if ( !g_pCVar )
+		return;
+
+	static constexpr char kPrefix[] = "VJOLT_CVAR_";
+	static constexpr size_t kPrefixLen = sizeof( kPrefix ) - 1;
+
+#ifdef _WIN32
+	char **ppEnv = _environ;
+#else
+	char **ppEnv = environ;
+#endif
+	for ( ; ppEnv && *ppEnv; ppEnv++ )
+	{
+		const char *pEntry = *ppEnv;
+		if ( V_strncmp( pEntry, kPrefix, kPrefixLen ) != 0 )
+			continue;
+
+		const char *pEquals = strchr( pEntry + kPrefixLen, '=' );
+		if ( !pEquals )
+			continue;
+
+		char name[128];
+		const size_t nameLen = Min( (size_t)( pEquals - ( pEntry + kPrefixLen ) ), sizeof( name ) - 1 );
+		memcpy( name, pEntry + kPrefixLen, nameLen );
+		name[ nameLen ] = '\0';
+
+		ConVar *pVar = g_pCVar->FindVar( name );
+		if ( !pVar )
+		{
+			Log_Warning( LOG_VJolt, "%s: no such convar\n", pEntry );
+			continue;
+		}
+
+		pVar->SetValue( pEquals + 1 );
+		Log_Msg( LOG_VJolt, "%s set from the environment to %s\n", name, pVar->GetString() );
+	}
+}
+
 InitReturnVal_t JoltPhysicsInterface::Init()
 {
 	const InitReturnVal_t nRetVal = BaseClass::Init();
@@ -110,6 +157,7 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 	}
 
 	MathLib_Init();
+	ApplyConVarOverridesFromEnvironment();
 
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
 	JPH::Allocate = VJoltAllocator::Allocate;

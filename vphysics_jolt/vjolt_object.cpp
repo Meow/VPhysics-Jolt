@@ -387,8 +387,8 @@ void JoltPhysicsObject::SetMass( float mass )
 
 	if ( !IsStatic() )
 	{
-		// Like IVP's change_mass, scale the current inertia with the mass instead of rebuilding it
-		// from the shape, so inertia set with SetInertia survives. Mass is already in KG.
+		// Scale the current inertia with the mass rather than rebuilding it from the shape, so
+		// inertia set with SetInertia is kept. Mass is in kg.
 		JPH::MotionProperties *pMotionProperties = m_pBody->GetMotionProperties();
 		if ( pMotionProperties->GetInverseMassUnchecked() > 0.0f )
 			pMotionProperties->ScaleToMass( mass );
@@ -1027,10 +1027,13 @@ namespace
 	{
 		JPH::BodyID BodyID;
 		JPH::Vec3 Normal;
+		JPH::Vec3 Point; // world space, on the other body
 		bool bStatic;
+		bool bBlocked;
 	};
 
 	static constexpr float kShadowContactDistance = 0.025f; // ~1 inch
+	static constexpr float kMaxCargoClosingPerStep = 0.1f; // ~4 inches
 	static constexpr int kShadowMaxContacts = 32;
 	// How many dynamic bodies a push may travel through before reaching the world
 	static constexpr int kShadowMaxChainDepth = 4;
@@ -1071,7 +1074,9 @@ namespace
 			m_Contacts[ m_nContacts++ ] = ShadowContact{
 				inResult.mBodyID2,
 				inResult.mPenetrationAxis.NormalizedOr( JPH::Vec3::sAxisZ() ),
+				inResult.mContactPointOn2,
 				body.IsStatic() || body.GetMotionType() != JPH::EMotionType::Dynamic,
+				false,
 			};
 		}
 
@@ -1169,7 +1174,7 @@ namespace
 	}
 }
 
-void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot )
+float JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocity, JPH::Vec3 &ioAngularVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot, float flDeltaTime )
 {
 	JoltPhysicsContactListener *pListener = m_pEnvironment->GetContactListener();
 
@@ -1182,19 +1187,42 @@ void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocit
 	ShadowContactCollector collector( m_pPhysicsSystem, pListener, this );
 	CollectShadowContacts( m_pPhysicsSystem, this, m_pBody->GetShape(), matCOMTransform, ioVelocity, visited, 1, collector );
 
+	// A blocked push also presses the surfaces together, and the friction that comes with that
+	// holds the body sideways: take out tangential velocity up to the friction coefficient times
+	// the pushing speed.
+	auto ApplyBlockedContactFriction = [&]( const ShadowContact &contact, float flInto )
+	{
+		float flOtherFriction = 1.0f;
+		{
+			JPH::BodyLockRead lock( m_pPhysicsSystem->GetBodyLockInterfaceNoLock(), contact.BodyID );
+			if ( lock.Succeeded() )
+				flOtherFriction = lock.GetBody().GetFriction();
+		}
+		const float flFriction = sqrtf( Max( m_pBody->GetFriction(), 0.0f ) * Max( flOtherFriction, 0.0f ) );
+
+		JPH::Vec3 vTangent = ioVelocity - contact.Normal * ioVelocity.Dot( contact.Normal );
+		const float flTangentSpeed = vTangent.Length();
+		if ( flTangentSpeed < 1e-4f )
+			return;
+
+		const float flHold = Min( flFriction * flInto, flTangentSpeed );
+		ioVelocity -= vTangent * ( flHold / flTangentSpeed );
+	};
+
 	for ( int i = 0; i < collector.m_nContacts; i++ )
 	{
-		const ShadowContact &contact = collector.m_Contacts[ i ];
+		ShadowContact &contact = collector.m_Contacts[ i ];
 		const float flInto = ioVelocity.Dot( contact.Normal );
 		if ( flInto <= 0.0f )
 			continue;
 
-		// Static contacts always block. Dynamic ones block when the body is pinned against the
-		// world in this direction, otherwise we'd push it into (and eventually through) the world
-		// with the controller's near-unlimited force. Pushing it is fine.
+		// Static contacts always block. Dynamic ones block when that body is pinned against the
+		// world in this direction; a free body is pushed.
 		if ( contact.bStatic )
 		{
 			ioVelocity -= contact.Normal * flInto;
+			contact.bBlocked = true;
+			ApplyBlockedContactFriction( contact, flInto );
 			continue;
 		}
 
@@ -1202,14 +1230,180 @@ void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocit
 		if ( IsBodyBlockedAlong( m_pPhysicsSystem, pListener, contact.BodyID, contact.Normal, visited, 1, kShadowMaxChainDepth, vSupportNormal ) )
 		{
 			ioVelocity -= contact.Normal * flInto;
+			contact.bBlocked = true;
 
 			// A slanted contact (pressing on the edge of a barrel) would still pass part of the
 			// push on towards the world, so don't push towards the support either.
 			const float flIntoSupport = ioVelocity.Dot( vSupportNormal );
 			if ( flIntoSupport > 0.0f )
 				ioVelocity -= vSupportNormal * flIntoSupport;
+
+			ApplyBlockedContactFriction( contact, flInto );
 		}
 	}
+
+	// The controller also sets the angular velocity. Rotating a blocked contact point into its
+	// surface grinds the other body down just like a linear push would, so take out the part
+	// of the rotation that moves each blocked contact point into its surface.
+	const JPH::Vec3 vCOM = matCOMTransform.GetTranslation();
+	for ( int i = 0; i < collector.m_nContacts; i++ )
+	{
+		const ShadowContact &contact = collector.m_Contacts[ i ];
+		if ( !contact.bBlocked )
+			continue;
+
+		const JPH::Vec3 r = contact.Point - vCOM;
+		const float flInto = ( ioVelocity + ioAngularVelocity.Cross( r ) ).Dot( contact.Normal );
+		if ( flInto <= 0.0f )
+			continue;
+
+		// (w x r) . n == w . (r x n)
+		const JPH::Vec3 vAxis = r.Cross( contact.Normal );
+		const float flAxisLenSq = vAxis.LengthSq();
+		if ( flAxisLenSq < 1e-8f )
+			continue;
+
+		ioAngularVelocity -= vAxis * ( flInto / flAxisLenSq );
+	}
+
+	// Don't drive our walls into what we touch faster than collision detection can follow: the
+	// solver and the extra collision steps cope with a few inches of relative travel per tick,
+	// beyond that a thin wall sweeps clean through a can. This bounds how fast a container may
+	// accelerate relative to its cargo (~45 g at 66 Hz), not its speed: cargo that's been pushed
+	// moves with us and stops limiting us.
+	const float flMaxCargoClosing = kMaxCargoClosingPerStep / Max( flDeltaTime, 1e-4f );
+	for ( int pass = 0; pass < 2; pass++ )
+	{
+		for ( int i = 0; i < collector.m_nContacts; i++ )
+		{
+			const ShadowContact &contact = collector.m_Contacts[ i ];
+			if ( contact.bStatic || contact.bBlocked )
+				continue;
+
+			JPH::BodyLockRead lock( m_pPhysicsSystem->GetBodyLockInterfaceNoLock(), contact.BodyID );
+			if ( !lock.Succeeded() || lock.GetBody().IsStatic() )
+				continue;
+
+			const JPH::Vec3 vOurs = ioVelocity + ioAngularVelocity.Cross( contact.Point - vCOM );
+			const JPH::Vec3 vTheirs = lock.GetBody().GetPointVelocity( contact.Point );
+			const float flClosing = ( vOurs - vTheirs ).Dot( contact.Normal );
+			if ( flClosing > flMaxCargoClosing )
+				ioVelocity -= contact.Normal * ( flClosing - flMaxCargoClosing );
+		}
+	}
+
+	// How fast what we carry or touch slides along us. When the physgun brakes a crate at a few
+	// g, the cans in it keep going and reach a wall at several units per tick, and Jolt's
+	// linear casting can't stop two fast bodies against each other.
+	float flMaxRelativeSpeed = 0.0f;
+	for ( int i = 0; i < collector.m_nContacts; i++ )
+	{
+		const ShadowContact &contact = collector.m_Contacts[ i ];
+		if ( contact.bStatic )
+			continue;
+
+		JPH::BodyLockRead lock( m_pPhysicsSystem->GetBodyLockInterfaceNoLock(), contact.BodyID );
+		if ( !lock.Succeeded() || lock.GetBody().IsStatic() )
+			continue;
+
+		const JPH::Vec3 vOurs = ioVelocity + ioAngularVelocity.Cross( contact.Point - vCOM );
+		const JPH::Vec3 vTheirs = lock.GetBody().GetPointVelocity( contact.Point );
+		flMaxRelativeSpeed = Max( flMaxRelativeSpeed, ( vOurs - vTheirs ).Length() );
+	}
+	return flMaxRelativeSpeed;
+}
+
+void JoltPhysicsObject::LimitShadowVelocityBySweep( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot, float flDeltaTime )
+{
+	// Continuous collision check for the driven body: it may move up to the first thing in its
+	// way this step; from then on the solver has a contact for the pair and pushes that thing
+	// along. Bodies already within contact distance are left to the solver and to
+	// ClampShadowVelocityAgainstContacts. The velocity is scaled, not projected, so the body
+	// keeps its direction and stops.
+	class SweepCollector final : public JPH::CastShapeCollector
+	{
+	public:
+		SweepCollector( JoltPhysicsObject *pSelf, JPH::PhysicsSystem *pSystem, JoltPhysicsContactListener *pListener, JPH::Vec3Arg vVelocity, JPH::Vec3Arg vDisplacement, float flDeltaTime, float flTouchDistance )
+			: m_pSelf( pSelf ), m_pSystem( pSystem ), m_pListener( pListener ), m_vVelocity( vVelocity ), m_vDisplacement( vDisplacement ), m_flDeltaTime( flDeltaTime ), m_flTouchDistance( flTouchDistance ) {}
+
+		void AddHit( const JPH::ShapeCastResult &inResult ) override
+		{
+			JPH::BodyLockRead lock( m_pSystem->GetBodyLockInterfaceNoLock(), inResult.mBodyID2 );
+			if ( !lock.Succeeded() )
+				return;
+			const JPH::Body &body = lock.GetBody();
+			if ( body.IsSensor() )
+				return;
+			JoltPhysicsObject *pOther = reinterpret_cast< JoltPhysicsObject * >( body.GetUserData() );
+			if ( !pOther || pOther == m_pSelf )
+				return;
+			if ( m_pListener && !m_pListener->ShouldCollide( m_pSelf, pOther ) )
+				return;
+
+			// Points from us into the other body
+			const JPH::Vec3 vNormal = inResult.mPenetrationAxis.NormalizedOr( JPH::Vec3::sZero() );
+			if ( vNormal.IsNearZero() )
+				return;
+
+			const float flDisplacementInto = m_vDisplacement.Dot( vNormal );
+			if ( flDisplacementInto <= 0.0f )
+				return;
+
+			// Already touching (or close enough that the solver has a contact for it)
+			const float flGap = inResult.mFraction * flDisplacementInto;
+			if ( flGap <= m_flTouchDistance )
+				return;
+
+			// Whatever we would hit may be moving out of our way (or into it)
+			const float flOtherInto = body.IsStatic() ? 0.0f : body.GetPointVelocity( inResult.mContactPointOn2 ).Dot( vNormal );
+			const float flClosing = m_vVelocity.Dot( vNormal ) - flOtherInto;
+			const float flAllowedClosing = flGap / m_flDeltaTime;
+			if ( flClosing <= flAllowedClosing )
+				return;
+
+			m_flScale = Min( m_flScale, Max( flAllowedClosing / flClosing, 0.0f ) );
+		}
+
+		float GetScale() const { return m_flScale; }
+
+	private:
+		JoltPhysicsObject *m_pSelf;
+		JPH::PhysicsSystem *m_pSystem;
+		JoltPhysicsContactListener *m_pListener;
+		JPH::Vec3 m_vVelocity;
+		JPH::Vec3 m_vDisplacement;
+		float m_flDeltaTime;
+		float m_flTouchDistance;
+		float m_flScale = 1.0f;
+	};
+
+	const JPH::Vec3 vDisplacement = ioVelocity * flDeltaTime;
+	if ( vDisplacement.IsNearZero() )
+		return;
+
+	const JPH::Mat44 matCOMTransform = JPH::Mat44::sRotationTranslation(
+		qBodyRot, vBodyPos + qBodyRot * m_pBody->GetShape()->GetCenterOfMass() );
+	// RShapeCast takes the centre of mass transform
+	const JPH::RShapeCast shapeCast( m_pBody->GetShape(), JPH::Vec3::sReplicate( 1.0f ), matCOMTransform, vDisplacement );
+
+	JPH::ShapeCastSettings settings;
+	settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
+	settings.mActiveEdgeMovementDirection = vDisplacement;
+	settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+	settings.mBackFaceModeConvex = JPH::EBackFaceMode::IgnoreBackFaces;
+
+	// Pairs this close have a (speculative) contact, which is what the solver and the contact
+	// clamp work with
+	const float flTouchDistance = Max( m_pPhysicsSystem->GetPhysicsSettings().mSpeculativeContactDistance, kShadowContactDistance );
+
+	SweepCollector collector( this, m_pPhysicsSystem, m_pEnvironment->GetContactListener(), ioVelocity, vDisplacement, flDeltaTime, flTouchDistance );
+	JPH::DefaultBroadPhaseLayerFilter bpFilter = m_pPhysicsSystem->GetDefaultBroadPhaseLayerFilter( Layers::MOVING );
+	JPH::DefaultObjectLayerFilter olFilter = m_pPhysicsSystem->GetDefaultLayerFilter( Layers::MOVING );
+	JPH::IgnoreSingleBodyFilter bodyFilter( m_pBody->GetID() );
+
+	m_pPhysicsSystem->GetNarrowPhaseQueryNoLock().CastShape( shapeCast, settings, JPH::RVec3::sZero(), collector, bpFilter, olFilter, bodyFilter );
+
+	ioVelocity *= collector.GetScale();
 }
 
 float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &params, float flSecondsToArrival, float flDeltaTime )
@@ -1243,21 +1437,25 @@ float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &p
 	float flNewSecondsToArrival =
 		ComputeShadowController( joltParams, scratchPosition, scratchRotation, scratchLinearVelocity, scratchAngularVelocity, flSecondsToArrival, flDeltaTime );
 
-	// IVP's shadow controller writes into pCore->speed which then participates in
-	// IVP's run-to-convergence contact resolution, implicitly clamping the velocity
-	// at any contact. Jolt's fixed-iteration solver can't fully clamp a hard-set
-	// velocity vector that points into a wall under sustained drive, which lets the
-	// physgun-held object (and anything it pushes) pass through walls. Pre-clamp the
-	// target velocity along blocked-direction contact normals before SetLinearAndAngularVelocity
-	// so the body isn't asked to move into a constrained direction in the first place.
-	//
-	// Static contacts always block. Dynamic contacts block if that body is itself pinned
-	// against static geometry along the same direction, possibly through a few more bodies
-	// (handles "push A down onto B sitting on the ground").
-	if ( !scratchLinearVelocity.IsNearZero() )
+	// Clamp the target velocity along blocked contact normals before it is set on the body, so
+	// the controller never drives the body into something that cannot move out of the way.
+	// Static contacts always block. Dynamic contacts block if that body is itself pinned against
+	// static geometry along the same direction, possibly through a few more bodies (a prop
+	// pressed down onto a prop sitting on the ground).
+	float flCargoRelativeSpeed = 0.0f;
+	if ( !scratchLinearVelocity.IsNearZero() || !scratchAngularVelocity.IsNearZero() )
 	{
-		ClampShadowVelocityAgainstContacts( scratchLinearVelocity, scratchPosition, scratchRotation );
+		flCargoRelativeSpeed = ClampShadowVelocityAgainstContacts( scratchLinearVelocity, scratchAngularVelocity, scratchPosition, scratchRotation, flDeltaTime );
 	}
+	if ( !scratchLinearVelocity.IsNearZero() && flDeltaTime > 0.0f )
+	{
+		LimitShadowVelocityBySweep( scratchLinearVelocity, scratchPosition, scratchRotation, flDeltaTime );
+	}
+
+	// Fast spinning containers sweep their walls through what they carry, and braking ones have
+	// the cargo slide into the walls; the environment adds collision steps for that
+	const float flRadius = m_pBody->GetShape()->GetLocalBounds().GetExtent().Length();
+	m_pEnvironment->ReportDrivenObjectSpeed( Max( scratchAngularVelocity.Length() * flRadius, flCargoRelativeSpeed ) );
 
 	if ( scratchPosition != position || scratchRotation != rotation )
 		bodyInterface.SetPositionAndRotation( m_pBody->GetID(), scratchPosition, scratchRotation, JPH::EActivation::Activate );
@@ -1651,6 +1849,17 @@ void JoltPhysicsObject::PostSimulation( float flTimestep )
 	m_vLastAngularVelocity = JoltToSource::Unitless( m_pBody->GetWorldTransform().Multiply3x3Transposed( SourceToJolt::Unitless( vGlobalAngleVelocity ) ) );
 
 	m_qLastOrientation = qCurrentOrientation;
+
+	m_vPostStepLinearVelocity = m_pBody->GetLinearVelocity();
+	m_vPostStepAngularVelocity = m_pBody->GetAngularVelocity();
+}
+
+JPH::Vec3 JoltPhysicsObject::GetPostStepPointVelocity( JPH::Vec3Arg vWorldPoint ) const
+{
+	if ( IsStatic() )
+		return JPH::Vec3::sZero();
+
+	return m_vPostStepLinearVelocity + m_vPostStepAngularVelocity.Cross( vWorldPoint - m_pBody->GetCenterOfMassPosition() );
 }
 
 //-------------------------------------------------------------------------------------------------

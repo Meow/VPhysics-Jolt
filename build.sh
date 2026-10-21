@@ -18,7 +18,8 @@
 #
 # Environment:
 #   VJOLT_SDK_DIR   Source SDK src directory to build against. Default: the pinned
-#                   mini-source-sdk (gmod) is cloned into build/sdk.
+#                   mini-source-sdk (gmod) is cloned into build/sdk and the patches in
+#                   sdk-patches/ are applied to it (a directory given here is used as is).
 #   DOCKER          container runtime (default: docker)
 #   JOBS            parallel jobs (default: nproc)
 #   DEBIAN_MIRROR   Debian mirror host for the Windows toolchain image (default: deb.debian.org)
@@ -51,13 +52,21 @@ if [ -n "${VJOLT_SDK_DIR:-}" ]; then
 	sdk=$(cd "$VJOLT_SDK_DIR" && pwd)
 else
 	checkout=$root/build/sdk/mini-source-sdk
-	if [ "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" != "$sdk_commit" ]; then
+	# Fixes the SDK needs that aren't upstream yet (see sdk-patches/)
+	patches=$(cat "$root"/sdk-patches/*.patch 2>/dev/null | cksum | cut -d' ' -f1)
+	if [ "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" != "$sdk_commit" ] || [ "$(cat "$checkout/.vjolt-patches" 2>/dev/null)" != "$patches" ]; then
 		echo "Fetching mini-source-sdk $sdk_commit"
 		rm -rf "$checkout"
 		mkdir -p "$checkout"
 		git -C "$checkout" init -q
 		git -C "$checkout" fetch -q --depth 1 "$sdk_repo" "$sdk_commit"
 		git -C "$checkout" checkout -q FETCH_HEAD
+		for patch in "$root"/sdk-patches/*.patch; do
+			[ -f "$patch" ] || continue
+			echo "Applying $(basename "$patch")"
+			git -C "$checkout" apply "$patch"
+		done
+		echo "$patches" > "$checkout/.vjolt-patches"
 	fi
 	sdk=$checkout/gmod/src
 fi

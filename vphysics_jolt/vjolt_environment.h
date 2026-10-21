@@ -205,6 +205,10 @@ public:
 	// Objects were created or destroyed, rebuild the list GetObjectList returns
 	void MarkObjectListDirty() const { m_bObjectListDirty = true; }
 
+	// Called by shadow controlled objects (physgun etc.) with how fast their surface sweeps
+	// through space this tick, in m/s
+	void ReportDrivenObjectSpeed( float flSpeed ) { m_flMaxDrivenObjectSpeed = Max( m_flMaxDrivenObjectSpeed, flSpeed ); }
+
 private:
 
 	void RemoveBodyAndDeleteObject( JoltPhysicsObject* pObject );
@@ -219,6 +223,7 @@ private:
 	void HandleDebugDumpingEnvironment( void* pReturnAddress );
 
 	bool m_bSimulating = false;
+	float m_flMaxDrivenObjectSpeed = 0.0f;
 	bool m_bEnableDeleteQueue = false;
 	bool m_bDeleteDeadObjectsAfterSimulation = false;
 	bool m_bWakeObjectsOnConstraintDeletion = false;

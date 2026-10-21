@@ -165,9 +165,7 @@ void ParseJoltKVSchema( KeyValues *pKV, const JoltKVSchemaProp_t *pDescs, uint c
     for ( KeyValues* pProp = pKV->GetFirstSubKey(); pProp != nullptr; pProp = pProp->GetNextKey() )
     {
         const char *pName = pProp->GetName();
-        // Per-key, not per-call: sticky state here meant that once any key matched the
-        // schema, every later unknown key was silently dropped instead of reaching the
-        // game's IVPhysicsKeyHandler.
+        // Per key, so every unknown key reaches the game's IVPhysicsKeyHandler
         bool bHandled = false;
 
         for ( uint i = 0; i < count; i++ )
@@ -217,16 +215,10 @@ void ParseJoltKVCustom( KeyValues *pKV, void *pUnknownKeyObj, IVPhysicsKeyHandle
 
 //-------------------------------------------------------------------------------------------------
 
-// IVP's script parser was line-oriented: a quote left open at the end of a line terminated
-// there, and stray bytes such as UTF-8 BOMs from community editors were skipped. Valve's
-// KeyValues tokenizer instead reads quoted strings across newlines, so one dirty line inverts
-// quote parity for the entire rest of the buffer (observed live in scripts/vehicles/LWCars: a
-// BOM cost chev_impala_09 its whole "Vehicle" block -> vehicle spawned with no physics at all,
-// and an unterminated "0.6 in ford_f350_ambu swallowed the second "Axle" block -> rear wheels
-// had no suspension and sank into the ground). Reproduce IVP's tolerance before handing the
-// buffer to KeyValues: drop BOM sequences and close any quote still open at end-of-line.
-// '//' comments are copied through without quote tracking so quotes inside them cannot flip
-// the parity state.
+// Makes a script buffer parse the way IVP's line-oriented script parser read it, before it is
+// handed to KeyValues (whose tokenizer reads quoted strings across newlines): drops UTF-8 BOM
+// sequences, closes any quote still open at the end of a line, and copies '//' comments
+// through without quote tracking.
 static void AppendSanitizedKVBuffer( CUtlVector<char> &out, const char *pszBuffer )
 {
 	bool bInQuote = false;
@@ -264,14 +256,9 @@ static void AppendSanitizedKVBuffer( CUtlVector<char> &out, const char *pszBuffe
 		out.AddToTail( '"' );
 }
 
-// One more IVP-tolerance case: a section keyword typed twice before its brace. HL2 itself
-// ships one (wood_crate001a_damaged.phy: "break break {" - a leftover from a hand-edited
-// gib list). IVP's parser resynced past the stray word; KeyValues instead reads the pair as
-// key "break" / string value "break", after which every following token is shifted one slot
-// ("fadetime"'s value "20" lands in key position, hits '}') and LoadFromBuffer rejects the
-// WHOLE buffer -> dummy-KV fallback loses the model's solid params and every break block
-// ("Trying to precache breakable prop, but has no model name"). Collapse an unquoted token
-// immediately repeated before a '{' down to a single token; quoted pairs are left alone.
+// Collapses an unquoted token repeated immediately before a '{' ("break break {", which HL2
+// ships in wood_crate001a_damaged.phy) to a single token, as IVP's parser read it. Quoted pairs
+// are left alone.
 static bool IsKVWordStart( char c )
 {
 	return ( c >= 'a' && c <= 'z' ) || ( c >= 'A' && c <= 'Z' ) || c == '_';

@@ -230,8 +230,7 @@ void JoltPhysicsConstraint::SetAngularMotor( float rotSpeed, float maxAngularImp
 			// :/
 
 			// InitialiseRagdoll creates a Fixed, Hinge or SwingTwist constraint depending on the
-			// number of free axes -- never a SixDOF -- so dispatch on the actual Jolt subtype.
-			// Casting to SixDOF here (as this used to) corrupts memory on $animatedfriction models.
+			// number of free axes, so dispatch on the Jolt subtype.
 			switch ( m_pConstraint->GetSubType() )
 			{
 				case JPH::EConstraintSubType::SwingTwist:
@@ -492,10 +491,8 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 			}
 		}
 
-		// Keep the Source-authored local frames for the joint's lifetime.
-		// LVS's common spawn rotation preserves their relative alignment;
-		// recapturing a later physics pose would turn transient tilt into
-		// the new rest pose instead of correcting it.
+		// Keep the Source-authored local frames for the joint's lifetime rather than
+		// recapturing them from a later physics pose.
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
 	}
 	else if ( uDOFCount == 0 )

@@ -5,6 +5,7 @@
 #include "vjolt_surfaceprops.h"
 
 
+
 struct JoltPhysicsContactPair
 {
 	JoltPhysicsContactPair( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
@@ -109,12 +110,9 @@ public:
 			const Vector vecCollideNormal = Vector( inManifold.mWorldSpaceNormal.GetX(), inManifold.mWorldSpaceNormal.GetY(), inManifold.mWorldSpaceNormal.GetZ() );
 			const float flCollisionSpeed = JoltPhysicsCollisionEvent::GetCollisionSpeed( pObject1, pObject2, vecCollideNormal );
 
-			// Skip impact reporting when either body is currently held by the player.
-			// The physgun's shadow controller drives the held body into the contact
-			// every tick; under IVP this would resolve to zero relative velocity at
-			// the contact (run-to-convergence), but Jolt's fixed-iteration solver
-			// leaves residual velocity that the engine reads as a "real" impact and
-			// triggers camera shake / impact sounds for what is really player input.
+			// Skip impact reporting while either body is held by the player: the shadow
+			// controller drives the held body into the contact every tick, and the residual
+			// velocity is player input, not an impact.
 			const bool bHeldByPlayer =
 				( pObject1->GetGameFlags() & FVPHYSICS_PLAYER_HELD ) ||
 				( pObject2->GetGameFlags() & FVPHYSICS_PLAYER_HELD );
@@ -190,10 +188,12 @@ public:
 		if ( flFrictionImpulseMag < 1e-4f )
 			return;
 
-		// Relative tangent velocity at the contact (first point — sliding contacts
-		// typically have one dominant manifold point).
+		// Relative tangent velocity at the first manifold point (sliding contacts typically have
+		// one dominant point), from the velocities the bodies ended the last step with. The
+		// current velocities include this tick's controller writes and gravity, which the solver
+		// takes out again.
 		const JPH::Vec3 vWorldContact = inManifold.GetWorldSpaceContactPointOn1( 0 );
-		const JPH::Vec3 vRel = inBody1.GetPointVelocity( vWorldContact ) - inBody2.GetPointVelocity( vWorldContact );
+		const JPH::Vec3 vRel = pObject1->GetPostStepPointVelocity( vWorldContact ) - pObject2->GetPostStepPointVelocity( vWorldContact );
 		const JPH::Vec3 vTangent = vRel - vRel.Dot( inManifold.mWorldSpaceNormal ) * inManifold.mWorldSpaceNormal;
 		const float flTangentSpeed = vTangent.Length();
 
@@ -202,11 +202,10 @@ public:
 		if ( flTangentSpeed < kMinTangentSpeed )
 			return;
 
-		// IVP's friction event reports `eliminated_energy / dt / mass` (specific power, W/kg)
-		// then converts to HL units with the same in²/m² factor we use here. We match that
-		// so the engine's energy thresholds behave as they did under IVP. The friction
-		// impulse from EstimateCollisionResponse is per-step; assume Source's typical
-		// 60Hz physics step for the dt scaling.
+		// Energy friction dissipates per second per kg of the object the game is called for
+		// (one object per contact, see FlushCallbacks), in HL units, which is what the engine's
+		// sound and effect thresholds expect. Below 0.05 W/kg nothing is reported. The friction
+		// impulse from EstimateCollisionResponse is per step; assume Source's 60 Hz physics step.
 		const float flMass1 = pObject1->IsStatic() ? 0.0f : pObject1->GetMass();
 		const float flMass2 = pObject2->IsStatic() ? 0.0f : pObject2->GetMass();
 		const float flMass = flMass1 > 0.0f ? flMass1 : flMass2;
@@ -215,15 +214,15 @@ public:
 
 		constexpr float kAssumedStepDt = 1.0f / 60.0f;
 		const float flPowerPerMass = ( flFrictionImpulseMag * flTangentSpeed ) / kAssumedStepDt / flMass;
+		if ( flPowerPerMass <= 0.05f )
+			return;
 		const float flEnergy = JoltToSource::Energy( flPowerPerMass );
 
 		// Snapshot also queries energy absorbed; track on both bodies.
 		pObject1->AccumulateContactFrictionEnergy( pObject2, flEnergy );
 		pObject2->AccumulateContactFrictionEnergy( pObject1, flEnergy );
 
-		m_FrictionEvents.EmplaceBack( GetThreadId(),
-			JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ),
-			flEnergy );
+		m_FrictionEvents.EmplaceBack( GetThreadId(), JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ), flEnergy );
 	}
 
 	void OnContactRemoved( const JPH::SubShapeIDPair &inSubShapePair )
@@ -290,7 +289,7 @@ public:
 
 	static inline uint64_t MakeCacheKey(JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1)
 	{
-		// Body IDs and pointers get reused, so a cached answer could otherwise outlive its objects
+		// Serial numbers are never reused, unlike body IDs and pointers
 		uint32_t keyA = pObject0->GetSerialNumber();
 		uint32_t keyB = pObject1->GetSerialNumber();
 		if (keyA > keyB)
@@ -444,22 +443,16 @@ public:
 		if ( !m_pGameListener )
 			return;
 
-		// Send PreCollision and PostCollision events, as adjacent pairs.
-		//
-		// They must come in matched pairs: the game latches the objects and entities of the
-		// collision in PreCollision (CCollisionEvent::m_gameEvent) and uses them in PostCollision.
-		// Sending all Pre events and then all Post events gave every Post but the last the wrong
-		// objects (e.g. "CPhysicsSwapTemp with bogus physics object" in CBoneFollower).
+		// Send PreCollision and PostCollision events as adjacent pairs: the game latches the
+		// objects and entities of the collision in PreCollision (CCollisionEvent::m_gameEvent)
+		// and uses them in PostCollision.
 		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
 		{
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
 
-			// Compute collisionSpeed from the post-resolution body velocities (matches
-			// IVP's contact->speed semantics: relative velocity at the contact surface
-			// after impulses have been applied). Reading pre-solver velocity here would
-			// over-report the impact for any externally-driven body (e.g. physgun-held
-			// props), causing spurious camera shake on sustained contact.
+			// collisionSpeed is the relative velocity at the contact after the solver has
+			// applied its impulses
 			Vector vel1, vel2, normal;
 			pObj1->GetVelocity( &vel1, nullptr );
 			pObj2->GetVelocity( &vel2, nullptr );
@@ -511,8 +504,11 @@ public:
 			const int nMtl1Hit = nMtl2;
 			const int nMtl2Hit = nMtl1;
 		#endif
-			m_pGameListener->Friction( pObj1, event.m_flEnergy, nMtl1, nMtl1Hit, &event.m_Data );
-			m_pGameListener->Friction( pObj2, event.m_flEnergy, nMtl2, nMtl2Hit, &event.m_Data );
+			// One callback per contact, for the object the energy was normalized by
+			if ( !pObj1->IsStatic() )
+				m_pGameListener->Friction( pObj1, event.m_flEnergy, nMtl1, nMtl1Hit, &event.m_Data );
+			else
+				m_pGameListener->Friction( pObj2, event.m_flEnergy, nMtl2, nMtl2Hit, &event.m_Data );
 		});
 
 		// Send EndTouch events
@@ -558,21 +554,33 @@ private:
 	// Collision detection calls OnContactAdded/Persisted at most once per sub shape pair per
 	// collision step. Linear casting (CCD) runs after it and calls them again when the cast hits a
 	// sub shape pair that already has a contact. Between two dynamic bodies that contact is
-	// already solved, so the CCD hit only stops the cast body for the rest of the step (Jolt
-	// "steals" its remaining time). A container moved by the physgun then keeps stopping at the
-	// props resting in it while they keep moving, and they end up in and through its walls.
-	// Turning the repeated contact into a sensor makes Jolt skip the CCD stop. CCD hits against
-	// static and kinematic bodies, and hits on pairs that weren't touching yet, are kept.
+	// already solved, and the CCD hit would only stop the cast body for the rest of the step, so
+	// the repeated contact is turned into a sensor, which makes Jolt skip that stop. CCD hits
+	// against static and kinematic bodies, hits on pairs that weren't touching yet, and hits
+	// between bodies approaching each other quickly are kept.
 	bool IsRedundantCCDContact( const JPH::Body &inBody1, const JPH::Body &inBody2, const JPH::ContactManifold &inManifold )
 	{
 		if ( !inBody1.IsDynamic() || !inBody2.IsDynamic() || !s_bSkipRedundantCCDContacts )
 			return false;
 
 		const uint64 key = JPH::SubShapeIDPair( inBody1.GetID(), inManifold.mSubShapeID1, inBody2.GetID(), inManifold.mSubShapeID2 ).GetHash();
-		StepContactShard &shard = m_StepContacts[ key % kStepContactShards ];
-		std::lock_guard lock( shard.Lock );
-		return !shard.Keys.insert( key ).second;
+		{
+			StepContactShard &shard = m_StepContacts[ key % kStepContactShards ];
+			std::lock_guard lock( shard.Lock );
+			if ( shard.Keys.insert( key ).second )
+				return false;
+		}
+
+		// Only skip the cast stop when the bodies move along together. When the physgun yanks a
+		// crate off at full speed, the cans in it haven't picked up any of that speed yet, and the
+		// walls would move straight through them, so leave the cast stop (and its impulse) to Jolt.
+		const JPH::Vec3 vContact = inManifold.GetWorldSpaceContactPointOn1( 0 );
+		const float flApproach = ( inBody1.GetPointVelocity( vContact ) - inBody2.GetPointVelocity( vContact ) ).Dot( inManifold.mWorldSpaceNormal );
+		return flApproach < kMaxTogetherApproachSpeed;
 	}
+
+	// 1 m/s is 40 units/s, a bit above what a hand carried container does to its contents per tick
+	static constexpr float kMaxTogetherApproachSpeed = 1.0f;
 
 public:
 	// vjolt_linearcast_skip_touching, refreshed every Simulate

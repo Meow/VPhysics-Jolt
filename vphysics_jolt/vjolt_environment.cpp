@@ -56,6 +56,10 @@ static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_N
 
 // RaphaelIT7: Setting it to 0 crashes Jolt, so let's limit it to a minimum of 1
 static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of collision steps per physics tick.", true, 1.0f, true, 8.0f );
+// A container swung around by the physgun sweeps its walls through what it carries. One collision
+// step per tick lets the walls move further than a can's radius between contact checks, so take
+// more steps while a held object spins fast. Only costs anything while that happens.
+static ConVar vjolt_substeps_max( "vjolt_substeps_max", "4", FCVAR_NONE, "Collision steps per tick to go up to while a held object moves fast.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
@@ -66,9 +70,8 @@ static ConVar vjolt_speculative_distance( "vjolt_speculative_distance", "0.02", 
 // into each other and the world (Jolt's 0.02 is 0.8 units). It also limits how far a linear cast
 // body may move into what it hits per step.
 static ConVar vjolt_penetration_slop( "vjolt_penetration_slop", "0.002", FCVAR_NONE, "Penetration (meters) allowed before position correction kicks in (Jolt mPenetrationSlop).", true, 0.0f, true, 1.0f );
-// Bodies that move less than this per step don't need linear casting. With 0 every moving body was
-// cast every step, which also made containers stop at the objects resting inside them (Jolt steals
-// the rest of the step from a cast body at its first hit) while those objects kept moving.
+// Bodies that move less than this per step are not linear cast. 0 casts every moving body every
+// step.
 static ConVar vjolt_linearcast_threshold( "vjolt_linearcast_threshold", "0.75", FCVAR_NONE, "Fraction of a body's inner radius it must move in a step before it is linear cast (Jolt mLinearCastThreshold).", true, 0.0f, true, 1.0f );
 static ConVar vjolt_linearcast_skip_touching( "vjolt_linearcast_skip_touching", "1", FCVAR_NONE, "Don't let linear casting stop a body at a dynamic body it is already touching (keeps props inside moving containers)." );
 static ConVar vjolt_linearcast_max_penetration( "vjolt_linearcast_max_penetration", "0.25", FCVAR_NONE, "Fraction of a body's inner radius it may move into another per step when linear casting (Jolt mLinearCastMaxPenetration).", true, 0.0f, true, 1.0f );
@@ -838,12 +841,16 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	m_ContactListener.PostSimulationFrame();
 
 	m_bSimulating = true;
+	m_flMaxDrivenObjectSpeed = 0.0f;
 
 	// Run pre-simulation controllers
 	for ( IJoltPhysicsController *pController : m_pPhysicsControllers )
 		pController->OnPreSimulate( deltaTime );
 
-	const int nCollisionSubSteps = vjolt_substeps.GetInt();
+	// Keep the surface of fast held objects from moving more than about a can's radius per step
+	static constexpr float kMaxDrivenTravelPerStep = 0.025f;
+	const int nDrivenSubSteps = (int)ceilf( m_flMaxDrivenObjectSpeed * deltaTime / kMaxDrivenTravelPerStep );
+	const int nCollisionSubSteps = Clamp( nDrivenSubSteps, vjolt_substeps.GetInt(), Max( vjolt_substeps.GetInt(), vjolt_substeps_max.GetInt() ) );
 
 	// If we haven't already, optimize the broadphase, currently this can only happen once per-environment
 	bool bInitialSimulation = false;

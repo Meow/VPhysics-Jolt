@@ -1,0 +1,19 @@
+diff --git a/gmod/src/public/tier1/convar.h b/gmod/src/public/tier1/convar.h
+index 27b9db5..13833ce 100644
+--- a/gmod/src/public/tier1/convar.h
++++ b/gmod/src/public/tier1/convar.h
+@@ -354,7 +354,14 @@ public:
+ 	virtual const char			*GetBaseName( void ) const;
+ 	virtual int					GetSplitScreenPlayerSlot() const;
+ #endif
++	// Only a virtual on the 64-bit branch (where ConCommandBase has it too). On 32-bit GMod
++	// a virtual here adds a vtable slot the engine doesn't have, which shifts SetValue and
++	// everything after it, so the engine can't set this module's convars.
++#if PLATFORM_64BITS
+ 	virtual int					GetFlags() const;
++#else
++	int							GetFlags() const;
++#endif
+ 	virtual void				AddFlags( int flags );
+ 	virtual	bool				IsCommand( void ) const;
+ 

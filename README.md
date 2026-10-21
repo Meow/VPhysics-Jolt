@@ -43,6 +43,26 @@ It is not meant to be a bash on anyone elses work however, the Bullet VPhysics p
 | Multithreaded                                                 | ❌ | ✔️ | ✔️ (partially) |
 | Proper player controller                                      | ✔️ | ✔️ | ✔️ (partially) |
 
+## Garry's Mod fork
+
+This fork targets Garry's Mod (32-bit and x86-64 branches, Linux and Windows, clients and dedicated servers). Beyond the Docker builds, it reworks how physgun-held objects interact with what they touch and carry (held objects can't press props into the ground, containers push their contents instead of sweeping through them, friction effects use the velocities bodies actually moved with), defers object deletion while the simulation runs, fixes the 64-bit module loading that crashed non-stock server launchers, and makes `vjolt_*` convars settable on 32-bit GMod (see `sdk-patches/`). Any `vjolt_*` convar can also be set at startup through the environment as `VJOLT_CVAR_<name>=<value>`.
+
+### Credit: Avrena's fork
+
+A good part of the GMod fixes here come from [Avrena/VPhysics-Jolt](https://github.com/Avrena/VPhysics-Jolt), who found and fixed them first. Taken from there, as cherry-picks or ports:
+
+- Collision pair hash cleanup across object buckets (`272fd47`).
+- Bounding-box collide cache keyed by extents, fixing the `CUtlRBTree` overflow (`105c7fd`).
+- Tolerant parsing of dirty `.phy`/vehicle script buffers: BOMs, unterminated quotes, doubled block keywords (`4326612`, `20352bc`), and per-key unknown-key handling in the schema parser.
+- Buoyancy from disabled fluid objects (`2a6dcf9`).
+- Vehicle axle ratio applied to the Jolt differentials, and non-automatic speed coupling (`d7482e7`, `4f7508e`).
+- `SetAngularMotor` dispatching on the actual constraint type, fixing memory corruption on `$animatedfriction` ragdolls (`cb199ad`).
+- Rotation-only ragdoll constraints honouring `onlyAngularLimits` (`b4aa0b2`, `a5e1ee5`).
+- Constraint group solver iterations (`f994301`, `7724ac4`).
+- `SetMass` scaling the existing inertia (`79a4194`), the fixed-constraint enable state (`b01d771`), `vec3_angle` and the velocity reset on teleport (`a5ae69c`), the temp allocator falling back to malloc (`803f3b5`), the `GetObjectList` cache (`17f38f7`, `fef7e5c`), and PreCollision/PostCollision events delivered as adjacent pairs (`7865b55`).
+
+Their Baumgarte and contact-recovery changes, which need their patched Jolt, were not taken.
+
 ## Bugs
 
 VPhysics Jolt is not without its flaws, however. See the [issue tracker](https://github.com/RaphaelIT7/VPhysics-Jolt/issues) for bugs that are known.
@@ -61,7 +81,7 @@ cd VPhysics-Jolt
 ./build.sh                 # or: ./build.sh linux32 linux64 win32 win64
 ```
 
-Linux builds use the Steam Runtime 3 (sniper) SDK image. Windows builds use MSVC (Visual Studio 2022) under Wine, via [msvc-wine](https://github.com/mstorsjo/msvc-wine); building that image downloads MSVC and accepts the [Visual Studio license](https://go.microsoft.com/fwlink/?LinkId=2086102).
+Patches in `sdk-patches/` are applied to the fetched SDK. Linux builds use the Steam Runtime 3 (sniper) SDK image. Windows builds use MSVC (Visual Studio 2022) under Wine, via [msvc-wine](https://github.com/mstorsjo/msvc-wine); building that image downloads MSVC and accepts the [Visual Studio license](https://go.microsoft.com/fwlink/?LinkId=2086102).
 
 The results go to `dist/`, laid out like the game directory:
 

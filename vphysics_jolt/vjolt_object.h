@@ -125,12 +125,19 @@ public:
 	float						ComputeShadowControl( const hlshadowcontrol_params_t &params, float secondsToArrival, float dt ) override;
 
 private:
-	// Pre-clamp the shadow target velocity along contact normals where the body cannot
-	// move (static contacts, or dynamic contacts whose other body is itself blocked
-	// statically in that direction). Mirrors IVP's velocity clamping during contact
-	// resolution. Modifies ioVelocity in place.
-	void ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot );
+	// Clamps the shadow target velocity along contact normals where the body cannot move
+	// (static contacts, or dynamic contacts whose other body is itself blocked statically in
+	// that direction), with friction on those contacts, and caps how fast the body may close in
+	// on the dynamic bodies it touches. Modifies the velocities in place.
+	// Returns how fast the touching bodies move relative to this one (m/s)
+	float ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioLinearVelocity, JPH::Vec3 &ioAngularVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot, float flDeltaTime );
+	// Scales the shadow target velocity down so the body stops at the first thing it would hit
+	// this step that it isn't touching yet
+	void LimitShadowVelocityBySweep( JPH::Vec3 &ioVelocity, const JPH::Vec3 &vBodyPos, const JPH::Quat &qBodyRot, float flDeltaTime );
 public:
+	// Velocity of a world point of this body at the end of the last simulation step, before this
+	// tick's controllers and gravity changed the body velocity
+	JPH::Vec3 GetPostStepPointVelocity( JPH::Vec3Arg vWorldPoint ) const;
 
 
 	const CPhysCollide *	GetCollide() const override;
@@ -313,6 +320,8 @@ private:
 
 	Vector m_vLastVelocity = vec3_origin;
 	AngularImpulse m_vLastAngularVelocity = vec3_origin;
+	JPH::Vec3 m_vPostStepLinearVelocity = JPH::Vec3::sZero();
+	JPH::Vec3 m_vPostStepAngularVelocity = JPH::Vec3::sZero();
 	Vector m_vLastPosition = vec3_origin;
 	QAngle m_qLastOrientation = vec3_angle;
 
